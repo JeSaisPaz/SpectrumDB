@@ -163,13 +163,13 @@ function SpectrumDB.scoped(prefix)
             schemaCopy[col] = fieldCopy
         end
 
-        -- 2. Intercept migrations to replace table name in SQL queries
+        -- 2. Intercept migrations to replace {TABLE_NAME} placeholder in SQL queries
         local migrationsCopy = {}
         for v, script in pairs(config.migrations or {}) do
             migrationsCopy[v] = function(db)
                 local dbProxy = {
                     exec = function(_, sql_str)
-                        local rewritten = string.gsub(sql_str, "([%s%(%,])" .. name .. "([%s%)]?)", "%1" .. prefixedName .. "%2")
+                        local rewritten = string.gsub(sql_str, "{TABLE_NAME}", prefixedName)
                         return db:exec(rewritten)
                     end
                 }

@@ -258,6 +258,7 @@ end
 -- Load SpectrumDB modules
 loadFile("lua/spectrumdb/promise.lua")
 loadFile("lua/spectrumdb/core.lua")
+loadFile("lua/spectrumdb/json.lua")
 loadFile("lua/spectrumdb/driver_sqlite.lua")
 loadFile("lua/spectrumdb/query_builder.lua")
 loadFile("lua/spectrumdb/model.lua")
@@ -866,7 +867,7 @@ describe("Scoped Tenant Namespaces", function()
             },
             migrations = {
                 [1] = function(db)
-                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, name TEXT)")
+                    db:exec("CREATE TABLE {TABLE_NAME} (id INTEGER PRIMARY KEY, name TEXT)")
                 end
             }
         })
@@ -880,7 +881,7 @@ describe("Scoped Tenant Namespaces", function()
             },
             migrations = {
                 [1] = function(db)
-                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, xp INTEGER)")
+                    db:exec("CREATE TABLE {TABLE_NAME} (id INTEGER PRIMARY KEY, xp INTEGER)")
                 end
             }
         })
@@ -908,6 +909,35 @@ describe("Scoped Tenant Namespaces", function()
         
         local lvlRows = sql.Query("SELECT * FROM lvl_User WHERE id = 1")
         assert_true(lvlRows == nil, "Level User table should remain empty")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 10. JSON FALLBACK PARSER TEST SUITE
+--------------------------------------------------------------------------------
+describe("JSON Fallback Parser", function()
+    it("should correctly encode and decode JSON objects and arrays", function()
+        local data = {
+            string = "hello \"world\"",
+            number = 123.45,
+            boolean = true,
+            array = {1, 2, 3},
+            empty = {},
+            nested = { key = "value" }
+        }
+        
+        local json_str = SpectrumDB.JSON.encode(data)
+        assert_true(type(json_str) == "string", "JSON encode should return a string")
+        
+        local decoded = SpectrumDB.JSON.decode(json_str)
+        assert_true(type(decoded) == "table", "JSON decode should return a table")
+        assert_eq(decoded.string, "hello \"world\"")
+        assert_eq(decoded.number, 123.45)
+        assert_eq(decoded.boolean, true)
+        assert_eq(decoded.array[1], 1)
+        assert_eq(decoded.array[2], 2)
+        assert_eq(decoded.array[3], 3)
+        assert_eq(decoded.nested.key, "value")
     end)
 end)
 

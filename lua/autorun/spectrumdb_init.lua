@@ -33,6 +33,7 @@ if SERVER then
     local files = {
         "spectrumdb/promise.lua",
         "spectrumdb/core.lua",
+        "spectrumdb/json.lua",
         "spectrumdb/driver_sqlite.lua",
         "spectrumdb/query_builder.lua",
         "spectrumdb/migrator.lua",

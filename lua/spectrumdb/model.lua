@@ -25,14 +25,8 @@ local function dbToLuaValue(val, dataType)
             if util and util.JSONToTable then
                 return util.JSONToTable(val)
             else
-                -- Fallback basic JSON-like parser for emulation testing
-                local cleaned = string.gsub(val, ":", "=")
-                local fn = load("return " .. cleaned)
-                if fn then
-                    local ok, tbl = pcall(fn)
-                    if ok then return tbl end
-                end
-                return val
+                -- Fallback safe JSON parser for emulation testing / standalone Lua
+                return SpectrumDB.JSON.decode(val) or val
             end
         end
         return val

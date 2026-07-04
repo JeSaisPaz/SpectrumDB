@@ -90,7 +90,7 @@ db:defineModel("User", {
     },
     migrations = {
         [1] = function(db)
-            db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, steamid TEXT UNIQUE)")
+            db:exec("CREATE TABLE {TABLE_NAME} (id INTEGER PRIMARY KEY, steamid TEXT UNIQUE)")
         end
     }
 })

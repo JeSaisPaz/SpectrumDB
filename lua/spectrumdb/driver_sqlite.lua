@@ -84,11 +84,16 @@ local function processQueue()
         tail = #queue
     end
     
+    local getTime = SysTime or os.clock
+    local startTime = getTime()
+    local maxTime = 0.005 -- 5ms max per frame
+    
     while true do
         local task = dequeueTask()
         if not task then break end
         
         local result = sql.Query(task.query)
+        local errMsg = result == false and (sql.LastError() or "Unknown SQL error") or nil
         
         local upper = string.upper(task.query)
         if string.match(upper, "^BEGIN") then
@@ -102,13 +107,20 @@ local function processQueue()
             if result == false then
                 task.reject({
                     code = "SPECTRUM_SQL_ERROR",
-                    message = sql.LastError() or "Unknown SQL error",
+                    message = errMsg,
                     sql = task.query
                 })
             else
                 task.resolve(result)
             end
         end)
+        
+        -- Time-slicing: yield to next tick if we exceed budget
+        if getTime() - startTime >= maxTime then
+            running = false
+            timer.Simple(0, processQueue)
+            return
+        end
     end
     
     running = false
@@ -195,24 +207,7 @@ function driver.escape(val, dataType)
         if util and util.TableToJSON then
             json_str = util.TableToJSON(val)
         else
-            -- Very basic Lua table to JSON serializer for emulation/testing
-            local function serializeTable(t)
-                local parts = {}
-                for k, v in pairs(t) do
-                    local key = type(k) == "string" and string.format('"%s"', k) or tostring(k)
-                    local val_part
-                    if type(v) == "table" then
-                        val_part = serializeTable(v)
-                    elseif type(v) == "string" then
-                        val_part = string.format('"%s"', v)
-                    else
-                        val_part = tostring(v)
-                    end
-                    table.insert(parts, string.format('%s:%s', key, val_part))
-                end
-                return "{" .. table.concat(parts, ",") .. "}"
-            end
-            json_str = serializeTable(val)
+            json_str = SpectrumDB.JSON.encode(val)
         end
         return sql.SQLStr(json_str)
     elseif dataType == SpectrumDB.Types.DATETIME then
