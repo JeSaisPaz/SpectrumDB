@@ -1,0 +1,19 @@
+# GMod SQLite files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# NodeJS dependencies & packages
+node_modules/
+package-lock.json
+
+# Local configurations / agents config
+.agents/
+.gemini/
+brain/
+logs/
+
+# Operating system metadata
+.DS_Store
+Thumbs.db

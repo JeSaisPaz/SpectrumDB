@@ -1,0 +1,17 @@
+{
+  "name": "spectredb-tests",
+  "version": "1.0.0",
+  "description": "Unit tests for SpectreDB using Bun and Wasmoon",
+  "main": "run_tests.ts",
+  "type": "module",
+  "scripts": {
+    "test": "bun run run_tests.ts"
+  },
+  "dependencies": {
+    "wasmoon": "^1.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}

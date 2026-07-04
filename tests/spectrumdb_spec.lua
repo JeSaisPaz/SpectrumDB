@@ -1,0 +1,915 @@
+-- Mocks for Garry's Mod environment
+function Vector(x, y, z)
+    return { x = tonumber(x) or 0, y = tonumber(y) or 0, z = tonumber(z) or 0, __isVector = true }
+end
+
+function Angle(p, y, r)
+    return { p = tonumber(p) or 0, y = tonumber(y) or 0, r = tonumber(r) or 0, __isAngle = true }
+end
+
+timer = {}
+local pending_timers = {}
+function timer.Simple(delay, callback)
+    table.insert(pending_timers, { delay = delay, callback = callback })
+end
+
+function timer.RunPending()
+    local ran = false
+    local run = pending_timers
+    pending_timers = {}
+    for _, t in ipairs(run) do
+        t.callback()
+        ran = true
+    end
+    return ran
+end
+
+-- Mock GMod sql engine
+sql = {}
+local mock_db_tables = {}
+local mock_db_rows = {}
+local mock_last_error = nil
+local mock_query_log = {}
+
+function sql.ClearMock()
+    mock_db_tables = {}
+    mock_db_rows = {}
+    mock_last_error = nil
+    mock_query_log = {}
+end
+
+function sql.Query(query_str)
+    print("MOCK QUERY RUN:", query_str)
+    table.insert(mock_query_log, query_str)
+    
+    if mock_last_error then
+        return false
+    end
+    
+    -- Strip newlines and compress spaces for parsing reliability
+    query_str = string.gsub(query_str, "%s+", " ")
+    -- Trim leading and trailing whitespace
+    query_str = string.gsub(query_str, "^%s+", "")
+    query_str = string.gsub(query_str, "%s+$", "")
+    
+    -- Very basic regex mock parser to support in-memory CRUD for testing
+    local upper = string.upper(query_str)
+    
+    if string.match(upper, "^CREATE TABLE") then
+        local tableName = string.match(query_str, "CREATE TABLE IF NOT EXISTS%s+([%w_]+)") or string.match(query_str, "CREATE TABLE%s+([%w_]+)")
+        if tableName then
+            mock_db_tables[tableName] = true
+            mock_db_rows[tableName] = {}
+        end
+        return nil
+    elseif string.match(upper, "^INSERT") then
+        local tableName, columns_str, values_str = string.match(query_str, "INSERT%s+.-INTO%s+([%w_]+)%s*%((.-)%)%s*VALUES%s*%(%s*(.-)%s*%)")
+        print("MOCK INSERT match:", tableName, columns_str, values_str)
+        if tableName and mock_db_rows[tableName] then
+            local cols = {}
+            for col in string.gmatch(columns_str, "[%w_]+") do
+                table.insert(cols, col)
+            end
+            
+            -- Basic split of values by comma, stripping quotes
+            local vals = {}
+            for val in string.gmatch(values_str, "[^,]+") do
+                val = string.gsub(val, "^%s*['\"]", "")
+                val = string.gsub(val, "['\"]%s*$", "")
+                val = string.gsub(val, "^%s*", "")
+                val = string.gsub(val, "%s*$", "")
+                table.insert(vals, val)
+            end
+            
+            local row = {}
+            for i, col in ipairs(cols) do
+                row[col] = vals[i]
+            end
+            
+            -- Auto increment id simulation
+            if not row.id then
+                row.id = tostring(#mock_db_rows[tableName] + 1)
+            end
+            
+            local replaced = false
+            if tableName == "_spectrumdb_migrations" then
+                for _, r in ipairs(mock_db_rows[tableName]) do
+                    if r.model_name == row.model_name then
+                        r.version = row.version
+                        r.applied_at = row.applied_at
+                        replaced = true
+                        break
+                    end
+                end
+            end
+            
+            if not replaced then
+                table.insert(mock_db_rows[tableName], row)
+            end
+            print("MOCK INSERT success, row contents:")
+            for k, v in pairs(row) do
+                print("  ", k, "=", "'" .. tostring(v) .. "'")
+            end
+            print("  rows count:", #mock_db_rows[tableName])
+            return nil
+        else
+            print("MOCK INSERT failed - table not found or nil table:", tableName)
+        end
+        return false
+    elseif string.match(upper, "^SELECT") then
+        local tableName = string.match(query_str, "FROM%s+([%w_]+)")
+        if tableName and mock_db_rows[tableName] then
+            -- If select table_info PRAGMA
+            if string.match(upper, "PRAGMA TABLE_INFO") then
+                local pragmaTable = string.match(query_str, "PRAGMA table_info%(([%w_]+)%)")
+                if pragmaTable and mock_db_tables[pragmaTable] then
+                    return {
+                        { cid = "0", name = "id", type = "INTEGER", notnull = "0", dflt_value = nil, pk = "1" },
+                        { cid = "1", name = "steamid", type = "TEXT", notnull = "0", dflt_value = nil, pk = "0" },
+                        { cid = "2", name = "points", type = "INTEGER", notnull = "0", dflt_value = "0", pk = "0" }
+                    }
+                end
+                return nil
+            end
+            
+            -- Return all rows for simple query, or perform basic filter
+            local q = string.gsub(query_str, "%s+LIMIT%s+%d+%s*$", "")
+            local where_col, where_val = string.match(q, "WHERE%s+([%w_]+)%s*=%s*['\"]?(.-)['\"]?%s*$")
+            if where_col then
+                where_val = string.gsub(where_val, "['\"]", "")
+                local results = {}
+                for _, r in ipairs(mock_db_rows[tableName]) do
+                    if r[where_col] == where_val then
+                        table.insert(results, r)
+                    end
+                end
+                return #results > 0 and results or nil
+            end
+            
+            return #mock_db_rows[tableName] > 0 and mock_db_rows[tableName] or nil
+        end
+        return nil
+    elseif string.match(upper, "^UPDATE") then
+        local tableName = string.match(query_str, "UPDATE%s+([%w_]+)")
+        if tableName and mock_db_rows[tableName] then
+            -- Match simple update where id = X
+            local set_clause, where_col, where_val = string.match(query_str, "SET%s+(.-)%s+WHERE%s+([%w_]+)%s*=%s*['\"]?(.-)['\"]?%s*$")
+            if set_clause and where_col then
+                where_val = string.gsub(where_val, "['\"]", "")
+                -- Parse updates
+                local updates = {}
+                for part in string.gmatch(set_clause, "[^,]+") do
+                    local col, val = string.match(part, "([%w_]+)%s*=%s*(.-)%s*$")
+                    if col and val then
+                        val = string.gsub(val, "^%s*['\"]", "")
+                        val = string.gsub(val, "['\"]%s*$", "")
+                        updates[col] = val
+                    end
+                end
+                
+                local count = 0
+                for _, r in ipairs(mock_db_rows[tableName]) do
+                    if r[where_col] == where_val then
+                        for k, v in pairs(updates) do
+                            r[k] = v
+                        end
+                        count = count + 1
+                    end
+                end
+                return nil
+            end
+        end
+        return false
+    elseif string.match(upper, "^BEGIN") or string.match(upper, "^COMMIT") or string.match(upper, "^ROLLBACK") then
+        return nil
+    end
+    
+    return nil
+end
+
+function sql.LastError()
+    return mock_last_error or "Unknown SQL error"
+end
+
+function sql.SQLStr(str)
+    return "'" .. string.gsub(str, "'", "''") .. "'"
+end
+
+-- Custom console error logger hook for testing unhandled promise rejections
+local logged_errors = {}
+SpectrumDBLog = {}
+function SpectrumDBLog.error(msg, reason, traceback)
+    table.insert(logged_errors, { msg = msg, reason = reason })
+end
+
+-- Test Framework Helpers
+local current_suite = ""
+local test_failed = false
+
+local function describe(name, fn)
+    current_suite = name
+    print("\n--- Suite: " .. name .. " ---")
+    local ok, err = pcall(fn)
+    if not ok then
+        print("  Error running suite: " .. tostring(err))
+        testFailed("Suite failed: " .. name)
+    end
+end
+
+local function it(name, fn)
+    local ok, err = pcall(fn)
+    if ok then
+        print("  [PASS] " .. name)
+    else
+        print("  [FAIL] " .. name .. " -- " .. tostring(err))
+        testFailed(current_suite .. " -> " .. name .. ": " .. tostring(err))
+    end
+end
+
+local function assert_eq(actual, expected, msg)
+    if actual ~= expected then
+        error(string.format("Expected '%s', got '%s'. %s", tostring(expected), tostring(actual), msg or ""), 2)
+    end
+end
+
+local function assert_true(val, msg)
+    if not val then
+        error(string.format("Expected true, got false/nil. %s", msg or ""), 2)
+    end
+end
+
+local function assert_false(val, msg)
+    if val then
+        error(string.format("Expected false, got true. %s", msg or ""), 2)
+    end
+end
+
+-- Load SpectrumDB files sequentially
+-- We load them from the parent directory using our JS bridge
+local function loadFile(path)
+    local content = readProjectFile(path)
+    local fn, err = load(content, path)
+    if not fn then
+        error("Failed to load " .. path .. ": " .. tostring(err))
+    end
+    fn()
+end
+
+-- Load SpectrumDB modules
+loadFile("lua/spectrumdb/promise.lua")
+loadFile("lua/spectrumdb/core.lua")
+loadFile("lua/spectrumdb/driver_sqlite.lua")
+loadFile("lua/spectrumdb/query_builder.lua")
+loadFile("lua/spectrumdb/model.lua")
+loadFile("lua/spectrumdb/migrator.lua")
+
+-- Override the global log to write into our mock list
+SpectrumDB.log = SpectrumDBLog
+
+--------------------------------------------------------------------------------
+-- 1. PROMISE TEST SUITE
+--------------------------------------------------------------------------------
+describe("Promise implementation", function()
+    it("should resolve basic value and chain .then_", function()
+        local resolved_val = nil
+        local p = SpectrumDB.Promise.new(function(resolve, reject)
+            resolve("hello")
+        end)
+        
+        p:then_(function(val)
+            resolved_val = val
+        end)
+        
+        timer.RunPending()
+        assert_eq(resolved_val, "hello", "Promise should resolve immediately if executor runs synchronously")
+    end)
+
+    it("should propagate values along then_ chains", function()
+        local final_val = nil
+        SpectrumDB.Promise.resolve(5)
+        :then_(function(val)
+            return val * 2
+        end)
+        :then_(function(val)
+            final_val = val
+        end)
+        
+        while timer.RunPending() do end
+        assert_eq(final_val, 10, "Value should propagate and transform through chain")
+    end)
+
+    it("should catch errors and propagate rejections", function()
+        local error_caught = nil
+        SpectrumDB.Promise.reject("my_error")
+        :catch(function(err)
+            error_caught = err
+        end)
+        
+        while timer.RunPending() do end
+        assert_eq(error_caught, "my_error", "Rejection should be caught by catch block")
+    end)
+
+    it("should defer rejection propagation to child if child has catch", function()
+        logged_errors = {}
+        
+        -- Create a promise chain where root is rejected, child is then_ and grandchild is catch
+        local root = SpectrumDB.Promise.new(function(resolve, reject)
+            reject("propagate_me")
+        end)
+        
+        local child = root:then_(function(val) end)
+        child:catch(function(err) end)
+        
+        timer.RunPending()
+        assert_eq(#logged_errors, 0, "Propagated rejections caught downstream should not trigger unhandled rejection log")
+    end)
+
+    it("should log unhandled promise rejections on the next frame", function()
+        logged_errors = {}
+        
+        local p = SpectrumDB.Promise.new(function(resolve, reject)
+            reject("unhandled_error_reason")
+        end)
+        
+        -- Wait a tick
+        timer.RunPending()
+        
+        assert_eq(#logged_errors, 1, "Should log unhandled rejection exactly once")
+        assert_eq(logged_errors[1].reason, "unhandled_error_reason", "Logged error reason must match")
+    end)
+    
+    it("should warn if catch is attached too late", function()
+        logged_errors = {}
+        
+        local p = SpectrumDB.Promise.reject("late_error")
+        
+        -- Tick 1: unhandled
+        timer.RunPending()
+        assert_eq(#logged_errors, 1, "Should warn about unhandled rejection")
+        
+        -- Tick 2: attach catch (too late)
+        p:catch(function(err) end)
+        timer.RunPending()
+        assert_eq(#logged_errors, 1, "Should not add another warning, but warning from Tick 1 remains logged")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 2. QUERY BUILDER & SANITIZATION TEST SUITE
+--------------------------------------------------------------------------------
+describe("Query Builder & Sanitization", function()
+    it("should escape strings, numbers, booleans safely", function()
+        assert_eq(SpectrumDB.escape("hello'world", "STRING"), "'hello''world'", "String escaping is unsafe")
+        assert_eq(SpectrumDB.escape(123.45, "FLOAT"), "123.45", "Float serialization is incorrect")
+        assert_eq(SpectrumDB.escape(true, "BOOLEAN"), "1", "Boolean true should map to 1")
+        assert_eq(SpectrumDB.escape(false, "BOOLEAN"), "0", "Boolean false should map to 0")
+    end)
+
+    it("should raise an error when attempting order filters on Vector/Angle", function()
+        local schema = {
+            id = { type = "INTEGER", primaryKey = true },
+            pos = { type = "VECTOR" }
+        }
+        
+        -- Equals filter should pass
+        local ok, sql_str = pcall(function()
+            return SpectrumDB.QueryBuilder.buildWhere(schema, {
+                pos = Vector(1, 2, 3)
+            })
+        end)
+        assert_true(ok, "Vector equals should be allowed")
+        
+        -- Greater than filter should fail
+        local ok2, err = pcall(function()
+            return SpectrumDB.QueryBuilder.buildWhere(schema, {
+                pos = { gt = Vector(1, 2, 3) }
+            })
+        end)
+        assert_false(ok2, "Should forbid greater than comparison on Vector")
+        assert_true(string.find(err or "", "SPECTRUM_VALIDATION_ERROR") ~= nil, "Error code should be SPECTRUM_VALIDATION_ERROR")
+    end)
+
+    it("should translate atomic update operators correctly", function()
+        local schema = {
+            id = { type = "INTEGER", primaryKey = true },
+            points = { type = "INTEGER" }
+        }
+        
+        local sql_update = SpectrumDB.QueryBuilder.buildUpdate(schema, {
+            points = { increment = 10 }
+        })
+        
+        assert_true(string.find(sql_update, "points = points %+ 10") ~= nil, "Atomic increment not generated correctly: " .. sql_update)
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 3. SQLITE DRIVER TEST SUITE (FIFO QUEUE)
+--------------------------------------------------------------------------------
+describe("SQLite Driver & FIFO Queue", function()
+    it("should execute queries in strict FIFO order and run callbacks on next tick", function()
+        sql.ClearMock()
+        
+        local execution_order = {}
+        
+        local p1 = SpectrumDB.driver.execute("CREATE TABLE IF NOT EXISTS Test1 (id INTEGER)")
+        p1:then_(function() table.insert(execution_order, "A") end)
+        
+        local p2 = SpectrumDB.driver.execute("CREATE TABLE IF NOT EXISTS Test2 (id INTEGER)")
+        p2:then_(function() table.insert(execution_order, "B") end)
+        
+        -- Since the driver is synchronous under the hood, the SQL queries are executed immediately.
+        -- However, callbacks must resolve deferred in the next frame.
+        assert_eq(#execution_order, 0, "Callbacks should not execute immediately")
+        
+        -- Advance the clock
+        timer.RunPending()
+        
+        assert_eq(#execution_order, 2, "Both callbacks should have run")
+        assert_eq(execution_order[1], "A", "First query should execute and resolve first")
+        assert_eq(execution_order[2], "B", "Second query should execute and resolve second")
+    end)
+
+    it("should reject promise on sql error and differentiate nil results", function()
+        sql.ClearMock()
+        
+        -- Simulate SQL error
+        mock_last_error = "Syntax Error near 'SELECT'"
+        
+        local error_received = nil
+        SpectrumDB.driver.execute("SELECT * FROM NonExistent")
+        :catch(function(err)
+            error_received = err
+        end)
+        
+        timer.RunPending()
+        assert_true(error_received ~= nil, "Driver should reject on SQL failure")
+        assert_eq(error_received.code, "SPECTRUM_SQL_ERROR", "Error code should be SPECTRUM_SQL_ERROR")
+        assert_eq(error_received.message, "Syntax Error near 'SELECT'", "Error message should contain DB last error")
+        
+        -- Reset SQL error, now query returns nil (no results)
+        mock_last_error = nil
+        local success_received = false
+        local results_value = "sentinel"
+        
+        SpectrumDB.driver.execute("SELECT * FROM EmptyTable")
+        :then_(function(res)
+            success_received = true
+            results_value = res
+        end)
+        
+        timer.RunPending()
+        assert_true(success_received, "Query returning empty rows should resolve successfully")
+        assert_true(results_value == nil or (type(results_value) == "table" and #results_value == 0), "Empty table should resolve with nil or empty table")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 4. MODEL REGISTER & MIGRATION TEST SUITE
+--------------------------------------------------------------------------------
+describe("Schema Migrations", function()
+    it("should run migrations sequentially inside a transaction and update database version", function()
+        sql.ClearMock()
+        
+        -- Setup migrations metadata table manually
+        sql.Query("CREATE TABLE IF NOT EXISTS _spectrumdb_migrations (model_name TEXT PRIMARY KEY, version INTEGER, applied_at INTEGER)")
+        
+        local run_log = {}
+        
+        local migrationDef = {
+            version = 3,
+            schema = {
+                id = { type = "INTEGER", primaryKey = true },
+                steamid = { type = "STRING" },
+                points = { type = "INTEGER" }
+            },
+            migrations = {
+                [1] = function(db)
+                    table.insert(run_log, "v1")
+                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, steamid TEXT)")
+                end,
+                [2] = function(db)
+                    table.insert(run_log, "v2")
+                    db:exec("ALTER TABLE User ADD COLUMN points INTEGER DEFAULT 0")
+                end,
+                [3] = function(db)
+                    table.insert(run_log, "v3")
+                    db:exec("ALTER TABLE User ADD COLUMN extra TEXT")
+                end
+            }
+        }
+        
+        -- Run migrations
+        local ok, err = pcall(function()
+            SpectrumDB.Migrator.run("User", migrationDef)
+        end)
+        
+        assert_true(ok, "Migrations should complete successfully: " .. tostring(err))
+        assert_eq(#run_log, 3, "All three migration stages should run")
+        assert_eq(run_log[1], "v1", "v1 should run first")
+        assert_eq(run_log[2], "v2", "v2 should run second")
+        assert_eq(run_log[3], "v3", "v3 should run third")
+        
+        -- Check database version after migrations
+        local res = sql.Query("SELECT * FROM _spectrumdb_migrations WHERE model_name = 'User'")
+        assert_true(res ~= nil and #res == 1, "Migration log should contain one row for 'User'")
+        assert_eq(res[1].version, "3", "Database version should be updated to 3")
+    end)
+
+    it("should rollback completely if a migration step fails", function()
+        sql.ClearMock()
+        
+        sql.Query("CREATE TABLE IF NOT EXISTS _spectrumdb_migrations (model_name TEXT PRIMARY KEY, version INTEGER, applied_at INTEGER)")
+        
+        local run_log = {}
+        
+        local migrationDef = {
+            version = 2,
+            schema = {
+                id = { type = "INTEGER", primaryKey = true }
+            },
+            migrations = {
+                [1] = function(db)
+                    table.insert(run_log, "v1")
+                    db:exec("CREATE TABLE TestRollback (id INTEGER)")
+                end,
+                [2] = function(db)
+                    table.insert(run_log, "v2")
+                    mock_last_error = "Force migration failure"
+                    db:exec("ALTER TABLE TestRollback ADD COLUMN bad TEXT")
+                end
+            }
+        }
+        
+        local ok, err = pcall(function()
+            SpectrumDB.Migrator.run("TestRollback", migrationDef)
+        end)
+        
+        mock_last_error = nil
+        
+        assert_false(ok, "Migration runner should throw an error on step failure")
+        -- The database version should remain at version 1 and not updated to v2
+        local res = sql.Query("SELECT * FROM _spectrumdb_migrations WHERE model_name = 'TestRollback'")
+        assert_true(res ~= nil and #res == 1 and res[1].version == "1", "Failed migration should remain at version 1")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 5. COROUTINE ASYNC/AWAIT TEST SUITE
+--------------------------------------------------------------------------------
+describe("Coroutine Async/Await", function()
+    it("should yield and resume coroutines across ticks", function()
+        local val = nil
+        SpectrumDB.async(function()
+            val = SpectrumDB.await(SpectrumDB.Promise.resolve("async_val"))
+        end)
+        
+        while timer.RunPending() do end
+        assert_eq(val, "async_val", "await should return resolved value")
+    end)
+
+    it("should propagate errors in await to coroutine caller", function()
+        local caught = false
+        SpectrumDB.async(function()
+            local ok, err = pcall(function()
+                SpectrumDB.await(SpectrumDB.Promise.reject("async_fail"))
+            end)
+            if not ok and string.find(tostring(err), "async_fail") then
+                caught = true
+            end
+        end)
+        
+        while timer.RunPending() do end
+        assert_true(caught, "await should throw error on rejection")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 6. DRIVER QUEUE LIMITS TEST SUITE
+--------------------------------------------------------------------------------
+describe("Driver Queue Limits", function()
+    it("should reject query if queue size limit is exceeded", function()
+        sql.ClearMock()
+        SpectrumDB.MaxQueueSize = 2
+        
+        -- Manually backlog 2 tasks directly into driver.queue to simulate queue growth
+        table.insert(SpectrumDB.driver.queue, { query = "SELECT 1", resolve = function() end, reject = function() end })
+        table.insert(SpectrumDB.driver.queue, { query = "SELECT 2", resolve = function() end, reject = function() end })
+        
+        -- Enqueue 3rd task (should fail immediately)
+        local rejected = false
+        local err_obj = nil
+        SpectrumDB.driver.execute("SELECT 3"):catch(function(err)
+            rejected = true
+            err_obj = err
+        end)
+        
+        -- Run the timers to let the catch callback execute
+        while timer.RunPending() do end
+        
+        -- Clean up immediately to prevent blocking subsequent tests
+        SpectrumDB.MaxQueueSize = 1000
+        SpectrumDB.driver.queue = {}
+        
+        assert_true(rejected, "Query should be rejected immediately due to queue limit")
+        assert_eq(err_obj.code, "SPECTRUM_QUEUE_LIMIT_EXCEEDED", "Error code should be queue limit exceeded")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 7. MODEL UPSERT & NESTED WRITES TEST SUITE
+--------------------------------------------------------------------------------
+describe("Model Upsert & Nested Writes", function()
+    it("should upsert a record (create then update)", function()
+        sql.ClearMock()
+        
+        local User = SpectrumDB.defineModel("User", {
+            version = 1,
+            schema = {
+                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                steamid = { type = SpectrumDB.Types.STRING, unique = true, required = true },
+                name = { type = SpectrumDB.Types.STRING, default = "GMod Player" },
+                points = { type = SpectrumDB.Types.INTEGER, default = 0 }
+            },
+            migrations = {
+                [1] = function(db)
+                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
+                end
+            }
+        })
+        
+        -- Run upsert (should create)
+        local created = nil
+        User:upsert({
+            where = { steamid = "STEAM_0:1:999" },
+            create = { steamid = "STEAM_0:1:999", name = "CreateName", points = 10 },
+            update = { name = "UpdateName" }
+        }):then_(function(u) created = u end)
+        :catch(function(e) print("UPSERT1 ERROR:", e.code, e.message) end)
+        
+        while timer.RunPending() do end
+        assert_true(created ~= nil, "Upsert should create record if not exists")
+        assert_eq(created.name, "CreateName")
+        
+        -- Run upsert again (should update)
+        local updated = nil
+        User:upsert({
+            where = { steamid = "STEAM_0:1:999" },
+            create = { steamid = "STEAM_0:1:999", name = "CreateName", points = 10 },
+            update = { name = "UpdateName", points = 20 }
+        }):then_(function(u) updated = u end)
+        :catch(function(e) print("UPSERT2 ERROR:", e.code, e.message) end)
+        
+        while timer.RunPending() do end
+        assert_true(updated ~= nil, "Upsert should update record if it exists")
+        assert_eq(updated.name, "UpdateName")
+        assert_eq(updated.points, 20)
+    end)
+
+    it("should write parent and child records in a transaction (nested writes)", function()
+        sql.ClearMock()
+        sql.Query("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
+        
+        local User = SpectrumDB.Models.User
+        local InventoryItem = SpectrumDB.defineModel("InventoryItem", {
+            version = 1,
+            schema = {
+                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                userId = { type = SpectrumDB.Types.INTEGER, references = "User.id", required = true },
+                itemName = { type = SpectrumDB.Types.STRING, required = true },
+                quantity = { type = SpectrumDB.Types.INTEGER, default = 1 }
+            },
+            migrations = {
+                [1] = function(db)
+                    db:exec("CREATE TABLE InventoryItem (id INTEGER PRIMARY KEY AUTOINCREMENT, userId INTEGER, itemName TEXT, quantity INTEGER)")
+                end
+            }
+        })
+        
+        -- Run pending timers to register relation on User
+        while timer.RunPending() do end
+        
+        local user = nil
+        User:create({
+            steamid = "STEAM_0:1:888",
+            name = "ParentUser",
+            inventoryItems = {
+                create = {
+                    { itemName = "Shield", quantity = 1 },
+                    { itemName = "Sword", quantity = 2 }
+                }
+            }
+        }):then_(function(u) user = u end)
+        :catch(function(e) print("NESTED CREATE ERROR:", e.code, e.message) end)
+        
+        while timer.RunPending() do end
+        assert_true(user ~= nil, "Nested write create should succeed")
+        
+        -- Verify nested records were inserted into mock db
+        local items = sql.Query("SELECT * FROM InventoryItem WHERE userId = " .. user.id)
+        assert_true(items ~= nil and #items == 2, "Should insert 2 nested inventory items")
+        assert_eq(items[1].itemName, "Shield")
+        assert_eq(items[2].itemName, "Sword")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 8. EXTENDED SCHEMA VALIDATIONS & ADVANCED ARCHITECTURE TESTS
+--------------------------------------------------------------------------------
+describe("Extended Schema & Transactions", function()
+    it("should reject models defined without a primary key or with multiple primary keys", function()
+        local ok1, err1 = pcall(function()
+            SpectrumDB.defineModel("NoPK", {
+                version = 1,
+                schema = {
+                    name = { type = SpectrumDB.Types.STRING }
+                },
+                migrations = {
+                    [1] = function(db) end
+                }
+            })
+        end)
+        assert_false(ok1, "Should raise error if no primary key is specified")
+        assert_true(string.find(tostring(err1), "must define exactly one primary key field") ~= nil)
+
+        local ok2, err2 = pcall(function()
+            SpectrumDB.defineModel("MultiPK", {
+                version = 1,
+                schema = {
+                    id1 = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
+                    id2 = { type = SpectrumDB.Types.INTEGER, primaryKey = true }
+                },
+                migrations = {
+                    [1] = function(db) end
+                }
+            })
+        end)
+        assert_false(ok2, "Should raise error if multiple primary keys are specified")
+        assert_true(string.find(tostring(err2), "cannot define multiple primary keys") ~= nil)
+    end)
+
+    it("should reject nested transactions to prevent deadlocks", function()
+        local err_obj = nil
+        SpectrumDB.transaction(function(tx)
+            SpectrumDB.transaction(function(tx2)
+            end):catch(function(err)
+                err_obj = err
+            end)
+        end)
+        while timer.RunPending() do end
+        assert_true(err_obj ~= nil)
+        assert_eq(err_obj.code, "SPECTRUM_NESTED_TRANSACTION_ERROR")
+    end)
+
+    it("should dynamically resolve relation target defined after source model", function()
+        sql.ClearMock()
+        
+        -- Define Source first (pointing to Target which isn't defined yet)
+        local Source = SpectrumDB.defineModel("Source", {
+            version = 1,
+            schema = {
+                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
+                targetId = { type = SpectrumDB.Types.INTEGER, references = "Target.id" }
+            },
+            migrations = { [1] = function(db) db:exec("CREATE TABLE Source (id INTEGER PRIMARY KEY, targetId INTEGER)") end }
+        })
+        
+        -- Define Target second
+        local Target = SpectrumDB.defineModel("Target", {
+            version = 1,
+            schema = {
+                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
+                name = { type = SpectrumDB.Types.STRING }
+            },
+            migrations = { [1] = function(db) db:exec("CREATE TABLE Target (id INTEGER PRIMARY KEY, name TEXT)") end }
+        })
+        
+        -- Now perform a select with include. Source should dynamically resolve Target on-the-fly and memoize it.
+        sql.Query("INSERT INTO Target (id, name) VALUES (1, 'LazyTarget')")
+        sql.Query("INSERT INTO Source (id, targetId) VALUES (10, 1)")
+        
+        local resolved = nil
+        Source:findUnique({
+            where = { id = 10 },
+            include = { target = true }
+        }):then_(function(res)
+            resolved = res
+        end)
+        
+        while timer.RunPending() do end
+        assert_true(resolved ~= nil)
+        assert_true(resolved.target ~= nil)
+        assert_eq(resolved.target.name, "LazyTarget")
+        
+        -- Verify memoization
+        assert_true(Source.relations["target"] ~= nil)
+    end)
+
+    it("should isolate non-transactional queries while transaction is running", function()
+        sql.ClearMock()
+        local User = SpectrumDB.Models.User
+        sql.Query("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
+        
+        local tx_finished = false
+        local external_query_ran = false
+        
+        SpectrumDB.transaction(function(tx)
+            -- Within transaction: insert a user and return promise
+            return tx.User:create({ steamid = "STEAM_0:1:111", name = "TxUser" })
+            :then_(function()
+                -- Let's wait a tick to simulate slow transaction sequence
+                local p = SpectrumDB.Promise.new(function(res)
+                    timer.Simple(0, res)
+                end)
+                return p
+            end)
+            :then_(function()
+                tx_finished = true
+            end)
+        end)
+        
+        -- Outside transaction: immediately queue a non-transactional query
+        User:findMany():then_(function()
+            external_query_ran = true
+        end)
+        
+        -- Tick 1: transaction starts (BEGIN)
+        timer.RunPending()
+        assert_false(tx_finished, "Transaction shouldn't be finished yet")
+        assert_false(external_query_ran, "External query must be held back in deferredQueue")
+        assert_true(#SpectrumDB.driver.deferredQueue > 0, "External query should be in deferredQueue")
+        
+        -- Tick 2: transaction completes
+        while timer.RunPending() do end
+        assert_true(tx_finished, "Transaction should be finished")
+        assert_true(external_query_ran, "External query should run after transaction finishes")
+        assert_eq(#SpectrumDB.driver.deferredQueue, 0, "Deferred queue should be empty")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 9. SCOPED TENANT NAMESPACES TEST SUITE
+--------------------------------------------------------------------------------
+describe("Scoped Tenant Namespaces", function()
+    it("should prefix table names, rewrite migrations, and isolate models across scopes", function()
+        sql.ClearMock()
+        
+        local shopDb = SpectrumDB.scoped("shop")
+        local levelDb = SpectrumDB.scoped("lvl")
+        
+        -- Define User in shopDb scope
+        local shopUser = shopDb:defineModel("User", {
+            version = 1,
+            schema = {
+                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
+                name = { type = SpectrumDB.Types.STRING }
+            },
+            migrations = {
+                [1] = function(db)
+                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, name TEXT)")
+                end
+            }
+        })
+        
+        -- Define User in levelDb scope
+        local levelUser = levelDb:defineModel("User", {
+            version = 1,
+            schema = {
+                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
+                xp = { type = SpectrumDB.Types.INTEGER }
+            },
+            migrations = {
+                [1] = function(db)
+                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, xp INTEGER)")
+                end
+            }
+        })
+        
+        -- Verify table names are prefixed
+        assert_eq(shopUser.name, "shop_User")
+        assert_eq(levelUser.name, "lvl_User")
+        
+        -- Verify migrations ran on prefixed tables
+        assert_true(mock_db_tables["shop_User"])
+        assert_true(mock_db_tables["lvl_User"])
+        
+        -- Verify CRUD operates on prefixed tables
+        local shopCreated = nil
+        shopDb.User:create({ id = 1, name = "ShopItemUser" }):then_(function(res)
+            shopCreated = res
+        end)
+        
+        while timer.RunPending() do end
+        assert_true(shopCreated ~= nil)
+        
+        local shopRows = sql.Query("SELECT * FROM shop_User WHERE id = 1")
+        assert_true(shopRows ~= nil and #shopRows == 1)
+        assert_eq(shopRows[1].name, "ShopItemUser")
+        
+        local lvlRows = sql.Query("SELECT * FROM lvl_User WHERE id = 1")
+        assert_true(lvlRows == nil, "Level User table should remain empty")
+    end)
+end)
+
+
+
