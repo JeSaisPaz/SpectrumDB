@@ -1,4 +1,4 @@
-# SpectrumDB
+# 🌈 SpectrumDB
 
 SpectrumDB is an Object-Relational Mapper (ORM) designed for Garry's Mod SQLite database systems.
 
