@@ -26,16 +26,16 @@ Place the files in your Garry's Mod server's `addons` directory:
 garrysmod/addons/spectrumdb/
 ├── LICENSE
 ├── README.md
-├── lua/
-│   ├── autorun/
-│   │   └── spectrumdb_init.lua
-│   └── spectrumdb/
-│       ├── core.lua
-│       ├── driver_sqlite.lua
-│       ├── migrator.lua
-│       ├── model.lua
-│       ├── promise.lua
-│       └── query_builder.lua
+└── lua/
+    ├── autorun/
+    │   └── spectrumdb_init.lua
+    └── spectrumdb/
+        ├── core.lua
+        ├── driver_sqlite.lua
+        ├── migrator.lua
+        ├── model.lua
+        ├── promise.lua
+        └── query_builder.lua
 ```
 
 ---
