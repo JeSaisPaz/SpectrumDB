@@ -31,11 +31,11 @@ if SERVER then
 
     -- Autoloader for SpectrumDB
     local files = {
-        "spectrumdb/promise.lua",
         "spectrumdb/core.lua",
-        "spectrumdb/json.lua",
         "spectrumdb/driver_sqlite.lua",
+        "spectrumdb/driver_mysqloo.lua",
         "spectrumdb/query_builder.lua",
+        "spectrumdb/schema_migrator.lua",
         "spectrumdb/migrator.lua",
         "spectrumdb/model.lua"
     }
@@ -70,8 +70,8 @@ if SERVER then
         MsgC(c_blue, "                                    \\  BLUE      /\n")
         MsgC(c_purple, "                                     \\ VIOLET   / \n")
         MsgC(c_purple, "                                      '--------'  \n\n")
-        MsgC(c_cyan, "[SpectrumDB] Loaded successfully (Database + Promise ORM initialized).\n\n")
+        MsgC(c_cyan, "[SpectrumDB] Loaded successfully (Database ORM initialized).\n\n")
     else
-        print("[SpectrumDB] Loaded successfully (Database + Promise ORM initialized).")
+        print("[SpectrumDB] Loaded successfully (Database ORM initialized).")
     end
 end

@@ -1,7 +1,11 @@
 SpectrumDB = SpectrumDB or {}
 
 SpectrumDB.Models = SpectrumDB.Models or {}
+SpectrumDB.Drivers = SpectrumDB.Drivers or {}
 
+SpectrumDB.config = {}
+SpectrumDB._ready = false
+SpectrumDB._pendingModels = {}
 -- Core Logging wrapper
 SpectrumDB.log = {
     error = function(msg, reason, traceback)
@@ -28,167 +32,91 @@ SpectrumDB.Types = {
 -- PLUG/EMULATE driver reference
 SpectrumDB.driver = SpectrumDB.driver or nil
 
+SpectrumDB._txCounter = SpectrumDB._txCounter or 0
+
+function SpectrumDB.Configure(config)
+    SpectrumDB.config = config or {}
+    local driverName = SpectrumDB.config.driver or "sqlite"
+    
+    if string.lower(driverName) == "mysqloo" then
+        SpectrumDB.driver = SpectrumDB.Drivers.MySQLOO
+    else
+        SpectrumDB.driver = SpectrumDB.Drivers.SQLite
+    end
+    
+    if SpectrumDB.driver.connect then
+        SpectrumDB.driver.connect(SpectrumDB.config, function()
+            SpectrumDB._ready = true
+            if SpectrumDB.Migrator and SpectrumDB.Migrator.runAll then
+                SpectrumDB.Migrator.runAll(SpectrumDB._pendingModels)
+            end
+        end)
+    end
+end
+
 -- Global Transaction Helper
-function SpectrumDB.transaction(func)
-    local Promise = SpectrumDB.Promise
+function SpectrumDB.transaction(func, onSuccess, onError)
+    onSuccess = onSuccess or function() end
+    onError = onError or function(err) 
+        if SpectrumDB and SpectrumDB.log then 
+            SpectrumDB.log.error(err.message or "Transaction Error", nil, debug.traceback()) 
+        end 
+    end
     
-    return Promise.new(function(resolve, reject)
-        if not SpectrumDB.driver then
-            reject({ code = "SPECTRUM_SQL_ERROR", message = "No database driver configured." })
-            return
+    if not SpectrumDB.driver then
+        onError({ code = "SPECTRUM_SQL_ERROR", message = "No database driver configured." })
+        return
+    end
+    
+    -- Prevent nested transactions
+    if SpectrumDB.driver.activeTx then
+        onError({ code = "SPECTRUM_NESTED_TRANSACTION_ERROR", message = "Nested transactions are not supported by SpectrumDB." })
+        return
+    end
+    
+    SpectrumDB._txCounter = SpectrumDB._txCounter + 1
+    local txKey = "TX_" .. tostring(SpectrumDB._txCounter)
+    
+    -- Start SQL transaction
+    SpectrumDB.driver.execute("BEGIN TRANSACTION", txKey, function()
+        -- Create transactional context
+        local tx = {
+            execute = function(_, query_str, onExecSuccess, onExecError)
+                return SpectrumDB.driver.execute(query_str, txKey, onExecSuccess, onExecError)
+            end
+        }
+        
+        -- Bind registered model proxies to the transactional context
+        for modelName, model in pairs(SpectrumDB.Models) do
+            tx[modelName] = setmetatable({
+                _txKey = txKey
+            }, {
+                __index = model
+            })
         end
         
-        -- Prevent nested transactions
-        if SpectrumDB.driver.activeTx then
-            reject({ code = "SPECTRUM_NESTED_TRANSACTION_ERROR", message = "Nested transactions are not supported by SpectrumDB." })
-            return
+        local function tx_commit()
+            SpectrumDB.driver.execute("COMMIT", txKey, function() 
+                onSuccess() 
+            end)
         end
         
-        local txKey = tostring(math.random())
+        local function tx_rollback(err)
+            SpectrumDB.driver.execute("ROLLBACK", txKey, function()
+                onError(err)
+            end, function()
+                onError(err)
+            end)
+        end
         
-        -- Start SQL transaction
-        SpectrumDB.driver.execute("BEGIN TRANSACTION", txKey)
-        :then_(function()
-            -- Create transactional context
-            local tx = {
-                execute = function(_, query_str)
-                    return SpectrumDB.driver.execute(query_str, txKey)
-                end
-            }
-            
-            -- Bind registered model proxies to the transactional context
-            for modelName, model in pairs(SpectrumDB.Models) do
-                tx[modelName] = setmetatable({
-                    _txKey = txKey
-                }, {
-                    __index = model
-                })
-            end
-            
-            local ok, ret = pcall(func, tx)
-            if not ok then
-                -- Rollback on execution error
-                SpectrumDB.driver.execute("ROLLBACK", txKey)
-                :then_(function()
-                    reject({ code = "SPECTRUM_SQL_ERROR", message = tostring(ret) })
-                end)
-                return
-            end
-            
-            -- If user returned a Promise, wait for resolution before committing
-            if type(ret) == "table" and type(ret.then_) == "function" then
-                ret:then_(function(result)
-                    SpectrumDB.driver.execute("COMMIT", txKey)
-                    :then_(function() resolve(result) end, function(commit_err) reject(commit_err) end)
-                end, function(tx_err)
-                    SpectrumDB.driver.execute("ROLLBACK", txKey)
-                    :then_(function() reject(tx_err) end)
-                end)
-            else
-                -- Synchronous completion, commit immediately
-                SpectrumDB.driver.execute("COMMIT", txKey)
-                :then_(function() resolve(ret) end, function(commit_err) reject(commit_err) end)
-            end
-        end)
-        :catch(function(err)
-            reject(err)
-        end)
-    end)
-end
-
--- Coroutine async/await helpers
-function SpectrumDB.async(func)
-    local co = coroutine.create(func)
-    local function resume(...)
-        local ok, err = coroutine.resume(co, ...)
+        local ok, ret = pcall(func, tx, tx_commit, tx_rollback)
         if not ok then
-            SpectrumDB.log.error("Coroutine error in SpectrumDB.async:", err, debug.traceback(co))
+            -- Rollback on execution error
+            tx_rollback({ code = "SPECTRUM_SQL_ERROR", message = tostring(ret) })
+            return
         end
-    end
-    resume()
-end
 
-function SpectrumDB.await(promise)
-    local co = coroutine.running()
-    if not co then
-        error("SpectrumDB.await must be called inside SpectrumDB.async")
-    end
-    
-    promise:then_(function(val)
-        coroutine.resume(co, true, val)
-    end, function(err)
-        coroutine.resume(co, false, err)
+    end, function(begin_err)
+        onError(begin_err)
     end)
-    
-    local success, result = coroutine.yield()
-    if not success then
-        error(result)
-    end
-    return result
 end
-
--- Scoped Tenant Namespace Support for GMod Addons
-SpectrumDB.Scopes = SpectrumDB.Scopes or {}
-
-function SpectrumDB.scoped(prefix)
-    if SpectrumDB.Scopes[prefix] then
-        return SpectrumDB.Scopes[prefix]
-    end
-
-    local scope = {
-        prefix = prefix,
-        Models = {}
-    }
-    
-    setmetatable(scope, {
-        __index = function(t, key)
-            return scope.Models[key] or SpectrumDB[key]
-        end
-    })
-
-    function scope:defineModel(name, config)
-        local prefixedName = prefix .. "_" .. name
-        
-        -- 1. Rewrite references to target prefixed tables in this scope
-        local schemaCopy = {}
-        for col, fieldSchema in pairs(config.schema) do
-            local fieldCopy = {}
-            for k, v in pairs(fieldSchema) do fieldCopy[k] = v end
-            if fieldCopy.references then
-                local refModel, refField = string.match(fieldCopy.references, "([%w_]+)%.([%w_]+)")
-                if refModel and not string.find(refModel, "^" .. prefix .. "_") then
-                    fieldCopy.references = prefix .. "_" .. refModel .. "." .. refField
-                end
-            end
-            schemaCopy[col] = fieldCopy
-        end
-
-        -- 2. Intercept migrations to replace {TABLE_NAME} placeholder in SQL queries
-        local migrationsCopy = {}
-        for v, script in pairs(config.migrations or {}) do
-            migrationsCopy[v] = function(db)
-                local dbProxy = {
-                    exec = function(_, sql_str)
-                        local rewritten = string.gsub(sql_str, "{TABLE_NAME}", prefixedName)
-                        return db:exec(rewritten)
-                    end
-                }
-                script(dbProxy)
-            end
-        end
-
-        -- 3. Define the model globally
-        local globalModel = SpectrumDB.defineModel(prefixedName, {
-            version = config.version,
-            schema = schemaCopy,
-            migrations = migrationsCopy
-        })
-
-        scope.Models[name] = globalModel
-        return globalModel
-    end
-
-    SpectrumDB.Scopes[prefix] = scope
-    return scope
-end
-

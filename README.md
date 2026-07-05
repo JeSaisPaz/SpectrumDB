@@ -1,19 +1,18 @@
 # 🌈 SpectrumDB
 
-SpectrumDB is an Object-Relational Mapper (ORM) designed for Garry's Mod SQLite database systems.
+SpectrumDB is an Object-Relational Mapper (ORM) designed for Garry's Mod database systems, providing out-of-the-box support for both SQLite (zero-config) and MySQL (via MySQLOO).
 
-It provides a Promise-based API, schema validation, CRUD operations, migrations, and relationship management while resolving common GMod database performance issues such as main-thread blocking.
+It provides a lightweight callback-based API, schema validation, CRUD operations, automatic migrations, and dynamic relationship management, all while resolving common GMod database performance issues by utilizing non-blocking, asynchronous queueing.
 
 ---
 
 ## Features
 
+- **Multi-Dialect Driver Support**: Supports `sqlite` and `mysqloo` drivers via a unified dialect engine. Easily connect to remote databases or fallback to local SQLite natively.
 - **Serialized Queue (O(1))**: Optimized queue using head/tail index pointers rather than array shifting. Minimizes execution overhead under heavy query loads.
-- **Scoped Tenant Namespaces**: Host multiple addons on a single server sharing the same driver and queue without table or relationship namespace conflicts.
-- **Isolated Transactions**: Supports database transactions with nested transaction prevention (`SPECTRUM_NESTED_TRANSACTION_ERROR`) and outside query deferral.
-- **Dynamic Lazy Relations**: Resolves relationship schemas (`hasMany`/`belongsTo`) on-the-fly when requested, caching results for subsequent lookups.
-- **Synchronous Migrations**: Migrations run synchronously at boot-time to guarantee tables exist before any model executes.
-- **Coroutine Async/Await**: Integrates with GMod hooks using `SpectrumDB.async` and `SpectrumDB.await` for clean asynchronous code.
+- **Deterministic Transaction Integrity**: Supports nested-transaction prevention and defers external queries while holding atomic operations. Provides manual `commit()` / `rollback()` control to serialize concurrent callbacks.
+- **Dynamic Lazy Relations**: Resolves relationship schemas (`hasMany`/`belongsTo`) on-the-fly when requested, seamlessly executing relational queries behind the scenes.
+- **Asynchronous & Synchronous Migrations**: Schemas and table definitions are generated automatically. SQLite runs synchronously on boot for reliability, while MySQLOO runs async via a background queue.
 - **Vector & Angle Types**: Native support for GMod vector and angle type parsing.
 
 ---
@@ -32,9 +31,10 @@ garrysmod/addons/spectrumdb/
     └── spectrumdb/
         ├── core.lua
         ├── driver_sqlite.lua
+        ├── driver_mysqloo.lua
+        ├── schema_migrator.lua
         ├── migrator.lua
         ├── model.lua
-        ├── promise.lua
         └── query_builder.lua
 ```
 
@@ -42,11 +42,29 @@ garrysmod/addons/spectrumdb/
 
 ## Usage
 
-### 1. Model Definition
+### 1. Configuration & Driver Setup
+
+SpectrumDB allows you to select your backend database before executing any queries. By default, it runs on standard SQLite.
+
+```lua
+-- Configure a MySQLOO Backend
+SpectrumDB.Configure({
+    driver = "mysqloo",
+    host = "127.0.0.1",
+    port = 3306,
+    database = "gmod_server",
+    username = "root",
+    password = "password"
+})
+```
+
+### 2. Model Definition
+
+Define your schema and versions. SpectrumDB will automatically generate `CREATE TABLE` and `ALTER TABLE` SQL dialect syntaxes.
 
 ```lua
 local User = SpectrumDB.defineModel("User", {
-    version = 2,
+    version = 1,
     
     schema = {
         id       = { type = SpectrumDB.Types.INTEGER, primaryKey = true, autoIncrement = true },
@@ -58,46 +76,11 @@ local User = SpectrumDB.defineModel("User", {
     
     migrations = {
         [1] = function(db)
-            db:exec([[
-                CREATE TABLE User (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    steamid TEXT UNIQUE,
-                    xp INTEGER DEFAULT 0
-                )
-            ]])
-        end,
-        [2] = function(db)
-            db:exec("ALTER TABLE User ADD COLUMN level INTEGER DEFAULT 1")
-            db:exec("ALTER TABLE User ADD COLUMN lastPos TEXT")
+            -- SpectrumDB automatically creates the table using the schema!
+            -- Manual SQL migrations can be provided here if needed.
         end
     }
 })
-```
-
-### 2. Scoped Tenants (Multi-Addon Integration)
-
-If you are developing a standalone addon, you can request a scoped database instance to automatically prefix tables and isolate schemas.
-
-```lua
-local db = SpectrumDB.scoped("myleveling")
-
--- This creates the table 'myleveling_User' under the hood
-db:defineModel("User", {
-    version = 1,
-    schema = {
-        id      = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
-        steamid = { type = SpectrumDB.Types.STRING, unique = true }
-    },
-    migrations = {
-        [1] = function(db)
-            db:exec("CREATE TABLE {TABLE_NAME} (id INTEGER PRIMARY KEY, steamid TEXT UNIQUE)")
-        end
-    }
-})
-
-db.User:findUnique({ where = { id = 1 } }):then_(function(user)
-    print(user.steamid)
-end)
 ```
 
 ### 3. CRUD Operations
@@ -105,11 +88,15 @@ end)
 #### Create
 ```lua
 User:create({
-    steamid = "STEAM_0:1:123456",
-    xp = 100,
-    lastPos = Vector(100, 200, -50)
-}):then_(function(user)
+    data = {
+        steamid = "STEAM_0:1:123456",
+        xp = 100,
+        lastPos = Vector(100, 200, -50)
+    }
+}, function(user)
     print("User created: " .. user.id)
+end, function(err)
+    print("Error creating user: " .. err.message)
 end)
 ```
 
@@ -117,53 +104,47 @@ end)
 ```lua
 User:findUnique({
     where = { steamid = "STEAM_0:1:123456" }
-}):then_(function(user)
+}, function(user)
     if user then
         print("User found: Level " .. user.level)
+    else
+        print("User not found!")
     end
 end)
 ```
 
-#### Update & Save
+#### Update
 ```lua
 User:update({
     where = { steamid = "STEAM_0:1:123456" },
     data = { xp = { increment = 50 } } -- Supports: increment, decrement, multiply
-}):then_(function(user)
-    user.xp = user.xp + 10
-    user:save()
+}, function(user)
+    print("XP Incremented! New XP: " .. user.xp)
 end)
 ```
 
 ### 4. Transactions
 
+SpectrumDB transactions use a standard callback signature with explicit `commit()` and `rollback()` invocations. This ensures that the transaction remains locked while your nested async callbacks execute safely.
+
 ```lua
-SpectrumDB.transaction(function(tx)
-    return tx.User:create({ steamid = "STEAM_0:1:777", xp = 0 })
-    :then_(function(user)
-        return tx.User:update({
+SpectrumDB.transaction(function(tx, commit, rollback)
+    tx.User:create({
+        data = { steamid = "STEAM_0:1:777", xp = 0 }
+    }, function(user)
+        -- Inner update inside the transaction context
+        tx.User:update({
             where = { id = user.id },
             data = { xp = 500 }
-        })
-    end)
-end):then_(function(finalUser)
-    print("Transaction succeeded")
-end):catch(function(err)
-    print("Transaction failed: " .. err.message)
-end)
-```
-
-### 5. Coroutine Async/Await
-
-```lua
-SpectrumDB.async(function()
-    local user = SpectrumDB.await(User:findUnique({ where = { id = 1 } }))
-    
-    if user then
-        user.xp = user.xp + 100
-        SpectrumDB.await(user:save())
-        print("Updated user XP")
-    end
+        }, function(updatedUser)
+            -- Both the create and update succeeded; save the transaction!
+            commit()
+        end, rollback)
+    end, rollback)
+end, function()
+    print("Transaction succeeded, lock released.")
+end, function(err)
+    print("Transaction failed & rolled back: " .. err.message)
 end)
 ```
 

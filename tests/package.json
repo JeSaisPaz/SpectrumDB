@@ -5,13 +5,14 @@
   "main": "run_tests.ts",
   "type": "module",
   "scripts": {
-    "test": "bun run run_tests.ts"
+    "test": "tsx run_tests.ts"
   },
   "dependencies": {
     "wasmoon": "^1.16.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "tsx": "^4.23.0",
     "typescript": "^5.3.3"
   }
 }

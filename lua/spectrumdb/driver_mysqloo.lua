@@ -1,24 +1,16 @@
 SpectrumDB = SpectrumDB or {}
 
 local driver = {}
-SpectrumDB.Drivers = SpectrumDB.Drivers or {}
-SpectrumDB.Drivers.SQLite = driver
 
 driver.dialect = {
-    quoteIdent = function(name) return name end,
-    autoIncrementKeyword = "AUTOINCREMENT",
-    primaryKeyInline = true,
-    booleanType = "INTEGER",
-    jsonType = "TEXT",
+    quoteIdent = function(name) return "`" .. name .. "`" end,
+    autoIncrementKeyword = "AUTO_INCREMENT",
+    primaryKeyInline = false,
+    booleanType = "TINYINT(1)",
+    jsonType = "JSON",
     supportsForeignKeys = true,
-    foreignKeyPragma = "PRAGMA foreign_keys = ON"
+    foreignKeyPragma = nil
 }
-
--- Optimize SQLite settings at startup (WAL is not recommended on networked filesystems (NFS))
-if sql then
-    sql.Query("PRAGMA journal_mode=WAL")
-    sql.Query("PRAGMA synchronous=NORMAL")
-end
 
 local queue = {}
 local head, tail = 1, 0
@@ -31,10 +23,11 @@ local urgentQueue = {}
 driver.urgentQueue = urgentQueue
 
 local running = false
-local scheduled = false
 driver.activeTx = nil
+driver.db = nil
 
 local function dequeueTask()
+    -- Urgent queue bypasses standard head/tail for O(n) unshift behavior (rare)
     if #urgentQueue > 0 then
         return table.remove(urgentQueue, 1)
     end
@@ -95,68 +88,56 @@ local function mergeDeferredQueue()
     for k in pairs(deferredQueue) do deferredQueue[k] = nil end
 end
 
-local function getTime()
-    return SysTime and SysTime() or os.clock()
-end
-
 local function processQueue()
-    if running then return end
-    scheduled = false
+    if running or not driver.db then return end
     running = true
     
     if #queue > tail then
         tail = #queue
     end
     
-    local startTime = getTime()
-    local maxTime = SpectrumDB.MaxTickTime or 0.005 -- 5ms default budget
-    
-    while true do
-        local task = dequeueTask()
-        if not task then break end
-        
-        local result = sql.Query(task.query)
-        
-        if result == false then
-            local err = sql.LastError() or "Unknown SQL error"
-            
-            if task.onError then
-                task.onError({
-                    code = "SPECTRUM_SQL_ERROR",
-                    message = err,
-                    sql = task.query
-                })
-            end
-            -- Note: in standard execution, we don't automatically rollback everything
-            -- The transaction wrapper logic handles the rollback on error
-        else
-            -- Internal state tracking for active transactions
-            local upper = string.upper(task.query)
-            if string.match(upper, "^BEGIN") then
-                driver.activeTx = task.txKey or true
-            elseif string.match(upper, "^COMMIT") or string.match(upper, "^ROLLBACK") then
-                driver.activeTx = nil
-                -- Flush deferred queue back into main queue after Tx ends
-                mergeDeferredQueue()
-            end
-            
-            if task.onSuccess then
-                task.onSuccess(result)
-            end
-        end
-        
-        -- Time-slicing: yield to next tick if we exceed budget
-        if getTime() - startTime >= maxTime then
-            running = false
-            timer.Simple(0, processQueue)
-            return
-        end
+    local task = dequeueTask()
+    if not task then 
+        running = false
+        return 
     end
     
-    running = false
+    local q = driver.db:query(task.query)
+    
+    function q:onSuccess(data)
+        local upper = string.upper(task.query)
+        if string.match(upper, "^BEGIN") then
+            driver.activeTx = task.txKey or true
+        elseif string.match(upper, "^COMMIT") or string.match(upper, "^ROLLBACK") then
+            driver.activeTx = nil
+            mergeDeferredQueue()
+        end
+        
+        if task.onSuccess then
+            task.onSuccess(data)
+        end
+        
+        running = false
+        processQueue()
+    end
+    
+    function q:onError(err, sql)
+        if task.onError then
+            task.onError({
+                code = "SPECTRUM_SQL_ERROR",
+                message = err,
+                sql = task.query
+            })
+        end
+        
+        running = false
+        processQueue()
+    end
+    
+    q:start()
 end
 
-function driver.execute(query_str, txKey, onSuccess, onError, isUrgent)
+function driver.execute(query_str, txKey, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) 
         if SpectrumDB and SpectrumDB.log then 
@@ -185,17 +166,6 @@ function driver.execute(query_str, txKey, onSuccess, onError, isUrgent)
         return
     end
     
-    if isUrgent then
-        table.insert(urgentQueue, {
-            query = query_str,
-            txKey = txKey,
-            onSuccess = onSuccess,
-            onError = onError
-        })
-        processQueue()
-        return
-    end
-
     if #queue > tail then
         tail = #queue
     end
@@ -217,33 +187,24 @@ function driver.execute(query_str, txKey, onSuccess, onError, isUrgent)
         onSuccess = onSuccess,
         onError = onError
     }
-    if not scheduled and not running then
-        scheduled = true
-        timer.Simple(0, processQueue)
-    end
+    processQueue()
 end
 
 function driver.executeSync(query_str)
-    local result = sql.Query(query_str)
-    if result == false then
-        error({
-            code = "SPECTRUM_SQL_ERROR",
-            message = sql.LastError() or "Unknown SQL error",
-            sql = query_str
-        })
-    end
-    return result
+    error("SPECTRUM_SQL_ERROR: MySQLOO driver does not support executeSync. Use async execute only.")
 end
 
-
--- Escape values for SQLite driver (centralized escaping function hook)
 function driver.escape(val, dataType)
     if val == nil then
         return "NULL"
     end
     
     if dataType == SpectrumDB.Types.STRING then
-        return sql.SQLStr(tostring(val))
+        if driver.db then
+            return "'" .. driver.db:escape(tostring(val)) .. "'"
+        else
+            return "'" .. string.gsub(tostring(val), "'", "''") .. "'"
+        end
     elseif dataType == SpectrumDB.Types.INTEGER then
         local num = tonumber(val)
         if not num then
@@ -265,51 +226,117 @@ function driver.escape(val, dataType)
         else
             error("SPECTRUM_VALIDATION_ERROR: util.TableToJSON is missing, cannot serialize JSON")
         end
-        return sql.SQLStr(json_str)
+        if driver.db then
+            return "'" .. driver.db:escape(json_str) .. "'"
+        else
+            return "'" .. string.gsub(json_str, "'", "''") .. "'"
+        end
     elseif dataType == SpectrumDB.Types.DATETIME then
         if val == "now" or val == "NOW" then
-            return "strftime('%Y-%m-%d %H:%M:%S', 'now')"
+            return "NOW()"
         end
-        return sql.SQLStr(tostring(val))
+        if driver.db then
+            return "'" .. driver.db:escape(tostring(val)) .. "'"
+        else
+            return "'" .. string.gsub(tostring(val), "'", "''") .. "'"
+        end
     elseif dataType == SpectrumDB.Types.VECTOR then
-        -- Stored as TEXT "x y z"
         local x, y, z
         if type(val) == "Vector" or (type(val) == "table" and val.x) then
             x, y, z = val.x, val.y, val.z
         elseif type(val) == "userdata" then
-            -- In GMod, Vector has x,y,z fields or we can extract them
-            local s = tostring(val) -- "Vector(x, y, z)"
+            local s = tostring(val)
             x, y, z = string.match(s, "Vector%((.-),%s*(.-),%s*(.-)%)")
         end
         x = x or 0
         y = y or 0
         z = z or 0
-        return sql.SQLStr(string.format("%s %s %s", tostring(x), tostring(y), tostring(z)))
+        local str = string.format("%s %s %s", tostring(x), tostring(y), tostring(z))
+        if driver.db then
+            return "'" .. driver.db:escape(str) .. "'"
+        else
+            return "'" .. string.gsub(str, "'", "''") .. "'"
+        end
     elseif dataType == SpectrumDB.Types.ANGLE then
-        -- Stored as TEXT "p y r"
         local p, y, r
         if type(val) == "Angle" or (type(val) == "table" and val.p) then
             p, y, r = val.p, val.y, val.r
         elseif type(val) == "userdata" then
-            local s = tostring(val) -- "Angle(p, y, r)"
+            local s = tostring(val)
             p, y, r = string.match(s, "Angle%((.-),%s*(.-),%s*(.-)%)")
         end
         p = p or 0
         y = y or 0
         r = r or 0
-        return sql.SQLStr(string.format("%s %s %s", tostring(p), tostring(y), tostring(r)))
+        local str = string.format("%s %s %s", tostring(p), tostring(y), tostring(r))
+        if driver.db then
+            return "'" .. driver.db:escape(str) .. "'"
+        else
+            return "'" .. string.gsub(str, "'", "''") .. "'"
+        end
     else
-        return "'" .. string.gsub(tostring(val), "'", "''") .. "'"
+        if driver.db then
+            return "'" .. driver.db:escape(tostring(val)) .. "'"
+        else
+            return "'" .. string.gsub(tostring(val), "'", "''") .. "'"
+        end
+    end
+end
+
+local function fallbackToSQLite()
+    SpectrumDB.log.info("Falling back to SQLite driver...")
+    SpectrumDB.driver = SpectrumDB.Drivers.SQLite
+    if SpectrumDB.driver.connect then
+        SpectrumDB.driver.connect(SpectrumDB.config, function()
+            SpectrumDB._ready = true
+            if SpectrumDB.Migrator and SpectrumDB.Migrator.runAll then
+                SpectrumDB.Migrator.runAll(SpectrumDB._pendingModels)
+            end
+        end, function(err)
+            SpectrumDB.log.error("Fallback SQLite connection failed", err.message)
+        end)
     end
 end
 
 function driver.connect(config, onReady, onError)
     onReady = onReady or function() end
-    onError = onError or function(err) SpectrumDB.log.error("SQLite Connect Error", err.message) end
+    onError = onError or function(err) SpectrumDB.log.error("MySQLOO Connect Error", err.message) end
     
-    if sql and driver.dialect.foreignKeyPragma then
-        sql.Query(driver.dialect.foreignKeyPragma)
+    if not mysqloo then
+        SpectrumDB.log.error("mysqloo module is not installed or loaded.")
+        if config.fallbackToSQLite ~= false then
+            fallbackToSQLite()
+        else
+            onError({ code = "SPECTRUM_SQL_ERROR", message = "mysqloo missing and fallback disabled." })
+        end
+        return
     end
     
-    onReady()
+    local host = config.host or "127.0.0.1"
+    local port = config.port or 3306
+    local database = config.database or "gmod_server"
+    local username = config.username or "root"
+    local password = config.password or ""
+    
+    driver.db = mysqloo.connect(host, username, password, database, port)
+    
+    function driver.db:onConnected()
+        SpectrumDB.log.info("MySQLOO connected successfully.")
+        onReady()
+        processQueue()
+    end
+    
+    function driver.db:onConnectionFailed(err)
+        SpectrumDB.log.error("MySQLOO connection failed", err)
+        if config.fallbackToSQLite ~= false then
+            fallbackToSQLite()
+        else
+            onError({ code = "SPECTRUM_SQL_ERROR", message = "Connection failed: " .. tostring(err) })
+        end
+    end
+    
+    driver.db:connect()
 end
+
+SpectrumDB.Drivers = SpectrumDB.Drivers or {}
+SpectrumDB.Drivers.MySQLOO = driver

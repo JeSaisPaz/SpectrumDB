@@ -11,6 +11,14 @@ function SpectrumDB.escape(val, dataType)
     return SpectrumDB.driver.escape(val, dataType)
 end
 
+function SpectrumDB.raw(sql_str, txKey, onSuccess, onError)
+    if not SpectrumDB.driver then
+        if onError then onError({ code = "SPECTRUM_SQL_ERROR", message = "No driver is loaded." }) end
+        return
+    end
+    SpectrumDB.driver.execute(sql_str, txKey, onSuccess, onError)
+end
+
 local function isTable(t)
     return type(t) == "table" and not (t.x and t.y) and not (t.p and t.r) -- Not GMod Vector or Angle
 end
@@ -82,12 +90,12 @@ function QueryBuilder.buildWhere(schema, where)
                     error("SPECTRUM_VALIDATION_ERROR: Unknown query operator: " .. tostring(op))
                 end
                 
-                table.insert(parts, string.format("%s %s %s", field, sql_op, sql_val))
+                table.insert(parts, string.format("%s %s %s", SpectrumDB.driver.dialect.quoteIdent(field), sql_op, sql_val))
             end
         else
             -- Simple exact match filter e.g. { steamid = "STEAM_0:1" }
             local sql_val = SpectrumDB.escape(filter, dataType)
-            table.insert(parts, string.format("%s = %s", field, sql_val))
+            table.insert(parts, string.format("%s = %s", SpectrumDB.driver.dialect.quoteIdent(field), sql_val))
         end
     end
     
@@ -108,7 +116,7 @@ function QueryBuilder.buildInsert(tableName, schema, data)
         if not fieldSchema then
             error("SPECTRUM_VALIDATION_ERROR: Column '" .. tostring(col) .. "' is not defined in the schema.")
         end
-        table.insert(cols, col)
+        table.insert(cols, SpectrumDB.driver.dialect.quoteIdent(col))
         table.insert(vals, SpectrumDB.escape(val, fieldSchema.type))
     end
     
@@ -119,7 +127,7 @@ function QueryBuilder.buildInsert(tableName, schema, data)
         end
     end
     
-    return string.format("INSERT INTO %s (%s) VALUES (%s)", tableName, table.concat(cols, ", "), table.concat(vals, ", "))
+    return string.format("INSERT INTO %s (%s) VALUES (%s)", SpectrumDB.driver.dialect.quoteIdent(tableName), table.concat(cols, ", "), table.concat(vals, ", "))
 end
 
 -- Validate and build UPDATE clause (supports atomic operators)
@@ -136,20 +144,21 @@ function QueryBuilder.buildUpdate(schema, data)
         
         if type(val) == "table" and not (val.x and val.y) and not (val.p and val.r) then
             -- Check for atomic updates (increment, decrement, multiply)
+            local quotedCol = SpectrumDB.driver.dialect.quoteIdent(col)
             if val.increment then
                 local esc = SpectrumDB.escape(val.increment, dataType)
-                table.insert(parts, string.format("%s = %s + %s", col, col, esc))
+                table.insert(parts, string.format("%s = %s + %s", quotedCol, quotedCol, esc))
             elseif val.decrement then
                 local esc = SpectrumDB.escape(val.decrement, dataType)
-                table.insert(parts, string.format("%s = %s - %s", col, col, esc))
+                table.insert(parts, string.format("%s = %s - %s", quotedCol, quotedCol, esc))
             elseif val.multiply then
                 local esc = SpectrumDB.escape(val.multiply, dataType)
-                table.insert(parts, string.format("%s = %s * %s", col, col, esc))
+                table.insert(parts, string.format("%s = %s * %s", quotedCol, quotedCol, esc))
             else
                 error("SPECTRUM_VALIDATION_ERROR: Unsupported update structure for column: " .. col)
             end
         else
-            table.insert(parts, string.format("%s = %s", col, SpectrumDB.escape(val, dataType)))
+            table.insert(parts, string.format("%s = %s", SpectrumDB.driver.dialect.quoteIdent(col), SpectrumDB.escape(val, dataType)))
         end
     end
     
@@ -157,7 +166,7 @@ function QueryBuilder.buildUpdate(schema, data)
 end
 
 -- Validate and build SELECT fields
-function QueryBuilder.buildSelect(selectFields)
+function QueryBuilder.buildSelect(schema, selectFields)
     if not selectFields or next(selectFields) == nil then
         return "*"
     end
@@ -166,10 +175,18 @@ function QueryBuilder.buildSelect(selectFields)
     if type(selectFields) == "table" then
         -- Supports array representation e.g. { "id", "steamid" } or dictionary e.g. { id = true, steamid = true }
         for k, v in pairs(selectFields) do
+            local col_name
             if type(k) == "number" and type(v) == "string" then
-                table.insert(parts, v)
+                col_name = v
             elseif type(k) == "string" and v == true then
-                table.insert(parts, k)
+                col_name = k
+            end
+            
+            if col_name then
+                if not schema[col_name] then
+                    error("SPECTRUM_VALIDATION_ERROR: Column '" .. tostring(col_name) .. "' requested in select is not defined in the schema.")
+                end
+                table.insert(parts, SpectrumDB.driver.dialect.quoteIdent(col_name))
             end
         end
     end
