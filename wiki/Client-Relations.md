@@ -63,17 +63,25 @@ end)
 You can apply `where` filters directly to the `include` block to restrict the joined data!
 
 ```lua
-User:findUnique({
-    where = { id = 1 },
+local users = db:getModel("User")
+
+users:findMany({
     include = {
         inventory = {
-            where = { item_class = "weapon_crowbar" }
+            where = { type = "weapon" },
+            orderBy = { acquired_at = "DESC" }
         }
     }
-}, function(user)
-    -- user.inventory will ONLY contain 'weapon_crowbar' items
+}, function(results)
+    PrintTable(results)
 end)
 ```
+
+> [!WARNING]
+> **Important limitation regarding `limit` on `hasMany` relations:**
+> Because SpectrumDB optimizes `include` operations by batching them into a single `WHERE foreign_key IN (...)` query (to prevent the N+1 problem), applying a `limit` inside an `include` block applies to the **entire batched query**, not per-parent.
+> 
+> If you fetch 10 Users and include their `posts` with a `limit = 5`, you will get a maximum of 5 posts **in total** distributed among the users, *not* 5 posts per user. If you need a strict limit per parent, you must query the children individually.
 
 ## Nested Writes
 
