@@ -9,7 +9,15 @@ source_count: 2
 
 Welcome to the **SpectrumDB** LLM Wiki. This wiki compiles architectural notes, design decisions, GLua documentation, and progress logs for the SpectrumDB ORM project.
 
-## Core Documentation
+## 🎓 Beginner's Guide Course
+Start here to learn SpectrumDB step by step!
+- [[Course-01-Getting-Started]]: Philosophy, Database Connection, and Initialization.
+- [[Course-02-Defining-Models]]: Schema building, Data Types, and Automatic Migrations.
+- [[Course-03-CRUD-Operations]]: Creating, Reading, Updating, and Deleting records.
+- [[Course-04-Relationships]]: `belongsTo`, `hasMany`, nested writes, and `include` joins.
+- [[Course-05-Pro-Tips-and-Productivity]]: Transactions, Intent Caching, rawQuery, and Tick Budgeting.
+
+## 📚 Core Documentation
 
 - [[SpectrumDB-Concept]]: The core vision, problem statement, and high-level architecture of SpectrumDB.
 - [[GLua-Databases]]: Summary of research on Garry's Mod database systems (SQLite, MySQLOO, HTTP syncing) and their limitations.

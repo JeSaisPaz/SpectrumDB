@@ -7,6 +7,12 @@ function Angle(p, y, r)
     return { p = tonumber(p) or 0, y = tonumber(y) or 0, r = tonumber(r) or 0, __isAngle = true }
 end
 
+local _systime = 1000.0
+function SysTime()
+    _systime = _systime + 0.001
+    return _systime
+end
+
 timer = {}
 local pending_timers = {}
 function timer.Simple(delay, callback)
@@ -282,12 +288,12 @@ describe("Query Builder & Sanitization", function()
             pos = { type = db.Types.VECTOR }
         }
         
-        local sql_str, err1 = QueryBuilder.buildWhere(db.driver, schema, {
+        local sql_str, bindings1, err1 = QueryBuilder.buildWhere(db.driver, schema, {
             pos = Vector(1, 2, 3)
         })
         assert_true(err1 == nil, "Vector equals should be allowed")
         
-        local sql_str2, err2 = QueryBuilder.buildWhere(db.driver, schema, {
+        local sql_str2, bindings2, err2 = QueryBuilder.buildWhere(db.driver, schema, {
             pos = { gt = Vector(1, 2, 3) }
         })
         assert_true(err2 ~= nil, "Should forbid greater than comparison on Vector")
@@ -300,12 +306,12 @@ describe("Query Builder & Sanitization", function()
             points = { type = db.Types.INTEGER }
         }
         
-        local sql_update, err = QueryBuilder.buildUpdate(db.driver, schema, {
+        local sql_update, bindings, err = QueryBuilder.buildUpdate(db.driver, schema, {
             points = { increment = 10 }
         })
         
         assert_true(err == nil, "Update should not error")
-        assert_true(string.find(sql_update, "points = points %+ 10") ~= nil, "Atomic increment not generated correctly: " .. sql_update)
+        assert_true(string.find(sql_update, "points = points %+ %?") ~= nil, "Atomic increment not generated correctly: " .. sql_update)
     end)
 end)
 
@@ -320,11 +326,11 @@ describe("SQLite Driver & FIFO Queue", function()
         
         local execution_order = {}
         
-        db.driver:execute("CREATE TABLE IF NOT EXISTS Test1 (id INTEGER)", nil, function()
+        db:execute("CREATE TABLE IF NOT EXISTS Test1 (id INTEGER)", {}, nil, function()
             table.insert(execution_order, "A")
         end)
         
-        db.driver:execute("CREATE TABLE IF NOT EXISTS Test2 (id INTEGER)", nil, function()
+        db:execute("CREATE TABLE IF NOT EXISTS Test2 (id INTEGER)", {}, nil, function()
             table.insert(execution_order, "B")
         end)
         
@@ -342,7 +348,7 @@ describe("SQLite Driver & FIFO Queue", function()
         mock_last_error = "Syntax Error near 'SELECT'"
         
         local error_received = nil
-        db.driver:execute("SELECT * FROM NonExistent", nil, nil, function(err)
+        db:execute("SELECT * FROM NonExistent", {}, nil, nil, function(err)
             error_received = err
         end)
         
@@ -355,7 +361,7 @@ describe("SQLite Driver & FIFO Queue", function()
         local success_received = false
         local results_value = "sentinel"
         
-        db.driver:execute("SELECT * FROM EmptyTable", nil, function(res)
+        db:execute("SELECT * FROM EmptyTable", {}, nil, function(res)
             success_received = true
             results_value = res
         end)
@@ -652,6 +658,6 @@ describe("Extended Schema & Transactions", function()
         assert_eq(execution_order[1], "TX_CREATE", "Transaction should complete before external query")
         assert_eq(execution_order[2], "EXT_FIND", "External query should run after transaction")
         
-        assert_eq(#db.driver.deferredQueue, 0, "Deferred queue should be empty")
+        assert_eq(#db.scheduler.deferredQueue, 0, "Deferred queue should be empty")
     end)
 end)

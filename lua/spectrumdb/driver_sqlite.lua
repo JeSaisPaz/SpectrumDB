@@ -15,17 +15,6 @@ function SQLiteDriver.new(db)
         foreignKeyPragma = "PRAGMA foreign_keys = ON"
     }
 
-    -- Priority-aware Queue: tasks can have priority (0 = Normal, 1 = High)
-    instance.queue = {}
-    instance.deferredQueue = {}
-    
-    instance.head = 1
-    instance.tail = 0
-    
-    instance.running = false
-    instance.scheduled = false
-    instance.activeTx = nil
-    
     if sql then
         sql.Query("PRAGMA journal_mode=WAL")
         sql.Query("PRAGMA synchronous=NORMAL")
@@ -34,195 +23,64 @@ function SQLiteDriver.new(db)
     return instance
 end
 
-function SQLiteDriver:dequeueTask()
-    -- Scan for high priority tasks first (linear search, but queue should be small for urgent tasks)
-    for i = self.head, self.tail do
-        local task = self.queue[i]
-        if task and not task.processed and task.priority and task.priority >= 1 then
-            if self.activeTx and task.txKey ~= self.activeTx then
-                -- Belongs to another tx, can't process now
-            else
-                task.processed = true
-                if i == self.head then self.head = self.head + 1 end
-                return task
-            end
-        end
-    end
+function SQLiteDriver:interpolate(query_str, bindings)
+    if not bindings or #bindings == 0 then return query_str, nil end
     
-    -- Fast path for empty queue
-    if self.head > self.tail then
-        self.head = 1
-        self.tail = 0
-        for k in pairs(self.queue) do self.queue[k] = nil end
-        return nil
-    end
-    
-    -- Normal priority processing
-    if self.activeTx then
-        for i = self.head, self.tail do
-            local task = self.queue[i]
-            if task and not task.processed and task.txKey == self.activeTx then
-                task.processed = true
-                if i == self.head then self.head = self.head + 1 end
-                return task
-            end
-        end
-        return nil
-    else
-        while self.head <= self.tail do
-            local task = self.queue[self.head]
-            if task and not task.processed then
-                task.processed = true
-                local ret = task
-                self.head = self.head + 1
-                return ret
-            end
-            self.head = self.head + 1
-        end
-        return nil
-    end
-end
-
-function SQLiteDriver:mergeDeferredQueue()
-    if #self.deferredQueue == 0 then return end
-    
-    local temp = {}
-    for _, task in ipairs(self.deferredQueue) do
-        table.insert(temp, task)
-    end
-    for i = self.head, self.tail do
-        local task = self.queue[i]
-        if task and not task.processed then
-            table.insert(temp, task)
-        end
-    end
-    
-    self.queue = temp
-    self.head = 1
-    self.tail = #self.queue
-    
-    for k in pairs(self.deferredQueue) do self.deferredQueue[k] = nil end
-end
-
-function SQLiteDriver:getTime()
-    return SysTime and SysTime() or os.clock()
-end
-
-function SQLiteDriver:processQueue()
-    if self.running then return end
-    self.scheduled = false
-    self.running = true
-    
-    if #self.queue > self.tail then
-        self.tail = #self.queue
-    end
-    
-    local startTime = self:getTime()
-    local maxTime = self.db.config.MaxTickTime or 0.005
-    
-    while true do
-        local task = self:dequeueTask()
-        if not task then break end
+    local i = 0
+    local err
+    local interpolated = string.gsub(query_str, "%?", function()
+        i = i + 1
+        local binding = bindings[i]
+        if not binding then return "NULL" end
         
-        local result = sql.Query(task.query)
-        
-        if result == false then
-            local err = sql.LastError() or "Unknown SQL error"
-            
-            if task.onError then
-                task.onError({
-                    code = "SPECTRUM_SQL_ERROR",
-                    message = err,
-                    sql = task.query
-                })
-            end
-        else
-            local upper = string.upper(task.query)
-            if string.match(upper, "^BEGIN") then
-                self.activeTx = task.txKey or true
-            elseif string.match(upper, "^COMMIT") or string.match(upper, "^ROLLBACK") then
-                self.activeTx = nil
-                self:mergeDeferredQueue()
-            end
-            
-            if task.onSuccess then
-                task.onSuccess(result)
-            end
+        local escaped, escErr = self:escape(binding.value, binding.type)
+        if escErr then
+            err = escErr
+            return "NULL"
         end
-        
-        if self:getTime() - startTime >= maxTime then
-            self.running = false
-            timer.Simple(0, function() self:processQueue() end)
-            return
-        end
-    end
+        return escaped
+    end)
     
-    self.running = false
+    if err then return nil, err end
+    return interpolated, nil
 end
 
-function SQLiteDriver:execute(query_str, txKey, onSuccess, onError, priority)
+function SQLiteDriver:execute(query_str, bindings, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) 
         self.db.logger:error(err.message or "SQL Error", err.sql .. "\n" .. debug.traceback()) 
     end
 
-    local limit = self.db.config.MaxQueueSize or 1000
-    priority = priority or 0
-
-    if self.activeTx and txKey ~= self.activeTx then
-        if #self.deferredQueue >= limit then
-            onError({
-                code = "SPECTRUM_QUEUE_LIMIT_EXCEEDED",
-                message = string.format("Database deferred queue size limit exceeded (%d tasks).", limit),
-                sql = query_str
-            })
-            return
-        end
-        table.insert(self.deferredQueue, {
-            query = query_str,
-            txKey = txKey,
-            onSuccess = onSuccess,
-            onError = onError,
-            priority = priority
-        })
+    local final_sql, err = self:interpolate(query_str, bindings)
+    if err then
+        onError(err)
         return
     end
 
-    if #self.queue > self.tail then
-        self.tail = #self.queue
-    end
+    local result = sql.Query(final_sql)
     
-    local current_size = (self.tail - self.head + 1)
-    if current_size >= limit then
+    if result == false then
+        local sqlErr = sql.LastError() or "Unknown SQL error"
         onError({
-            code = "SPECTRUM_QUEUE_LIMIT_EXCEEDED",
-            message = string.format("Database query queue size limit exceeded (%d tasks).", limit),
-            sql = query_str
+            code = "SPECTRUM_SQL_ERROR",
+            message = sqlErr,
+            sql = final_sql
         })
-        return
-    end
-    
-    self.tail = self.tail + 1
-    self.queue[self.tail] = {
-        query = query_str,
-        txKey = txKey,
-        onSuccess = onSuccess,
-        onError = onError,
-        priority = priority
-    }
-    if not self.scheduled and not self.running then
-        self.scheduled = true
-        timer.Simple(0, function() self:processQueue() end)
+    else
+        onSuccess(result)
     end
 end
 
-function SQLiteDriver:executeSync(query_str)
-    local result = sql.Query(query_str)
+function SQLiteDriver:executeSync(query_str, bindings)
+    local final_sql, err = self:interpolate(query_str, bindings)
+    if err then return nil, err end
+    
+    local result = sql.Query(final_sql)
     if result == false then
         return nil, {
             code = "SPECTRUM_SQL_ERROR",
             message = sql.LastError() or "Unknown SQL error",
-            sql = query_str
+            sql = final_sql
         }
     end
     return result
@@ -284,7 +142,8 @@ function SQLiteDriver:escape(val, dataType)
         p = p or 0; y = y or 0; r = r or 0
         return sql.SQLStr(string.format("%s %s %s", tostring(p), tostring(y), tostring(r))), nil
     else
-        return "'" .. string.gsub(tostring(val), "'", "''") .. "'", nil
+        -- Fallback: Use sql.SQLStr to strictly prevent injection.
+        return sql.SQLStr(tostring(val)), nil
     end
 end
 

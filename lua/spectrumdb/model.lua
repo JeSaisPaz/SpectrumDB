@@ -255,10 +255,13 @@ function Model:create(args, onSuccess, onError)
         end
     end
     
-    local sql_str, err = QueryBuilder.buildInsert(self.db.driver, self.name, self.schema, data)
+    local sql_str, bindings, err = QueryBuilder.buildInsert(self.db.driver, self.name, self.schema, data)
     if err then onError(err) return end
     
-    self.db:execute(sql_str, self._txKey, function()
+    self.db:execute(sql_str, bindings, self._txKey, function()
+        -- Invalidate model cache
+        self.db.cache:invalidate(self.name)
+        
         local findWhere = {}
         for col, fieldSchema in pairs(self.schema) do
             if (fieldSchema.primaryKey or fieldSchema.unique) and data[col] then
@@ -300,7 +303,8 @@ function Model:create(args, onSuccess, onError)
         end
         
         if next(findWhere) == nil then
-            self.db:execute("SELECT * FROM " .. self.name .. " ORDER BY " .. self.pk_col .. " DESC LIMIT 1", self._txKey, function(rows)
+            -- Fallback if no primary key or unique fields provided
+            self.db:execute("SELECT * FROM " .. self.name .. " ORDER BY " .. self.pk_col .. " DESC LIMIT 1", {}, self._txKey, function(rows)
                 if rows and rows[1] then
                     local inst = createInstance(self, rows[1])
                     handleSuccess(inst)
@@ -319,14 +323,14 @@ function Model:create(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end)
+    end, 1) -- Create uses priority 1
 end
 
 function Model:findUnique(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    local where_sql, bindings, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
     
     local select_cols, errS = QueryBuilder.buildSelect(self.db.driver, self.schema, args.select)
@@ -334,16 +338,37 @@ function Model:findUnique(args, onSuccess, onError)
 
     local sql_str = string.format("SELECT %s FROM %s %s LIMIT 1", select_cols, self.name, where_sql)
     
-    self.db:execute(sql_str, self._txKey, function(rows)
-        if not rows or #rows == 0 then
-            onSuccess(nil)
-            return
-        end
-        local inst = createInstance(self, rows[1])
-        loadIncludes(self, { inst }, args.include, function()
-            onSuccess(inst)
-        end, onError)
-    end, onError)
+    -- Serialize intent for cache
+    local cacheKeyData = sql_str
+    if bindings and #bindings > 0 then
+        for _, b in ipairs(bindings) do cacheKeyData = cacheKeyData .. ":" .. tostring(b.value) end
+    end
+    -- Add include depth to cache key
+    if args.include then
+        for k, _ in pairs(args.include) do cacheKeyData = cacheKeyData .. "+inc:" .. k end
+    end
+    
+    local cacheKey = self.db.cache:buildKey(self.name, "query", cacheKeyData)
+    
+    local function fallbackFunc(cbSuccess, cbError)
+        self.db:execute(sql_str, bindings, self._txKey, function(rows)
+            if not rows or #rows == 0 then
+                cbSuccess(nil)
+                return
+            end
+            local inst = createInstance(self, rows[1])
+            loadIncludes(self, { inst }, args.include, function()
+                cbSuccess(inst)
+            end, cbError)
+        end, cbError, 1)
+    end
+    
+    -- If we are in a transaction, bypass caching to ensure reading dirty state is correct
+    if self._txKey then
+        fallbackFunc(onSuccess, onError)
+    else
+        self.db.cache:dedupeAndCache(cacheKey, self.db.config.CacheTTL, fallbackFunc, onSuccess, onError)
+    end
 end
 
 function Model:findMany(args, onSuccess, onError)
@@ -352,7 +377,7 @@ function Model:findMany(args, onSuccess, onError)
 
     args = args or {}
     
-    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    local where_sql, bindings, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
     
     local select_cols, errS = QueryBuilder.buildSelect(self.db.driver, self.schema, args.select)
@@ -380,27 +405,54 @@ function Model:findMany(args, onSuccess, onError)
     
     local sql_str = string.format("SELECT %s FROM %s %s %s %s", select_cols, self.name, where_sql, order_sql, limit_sql)
     
-    self.db:execute(sql_str, self._txKey, function(rows)
-        if not rows or #rows == 0 then onSuccess({}) return end
-        local instances = {}
-        for _, row in ipairs(rows) do table.insert(instances, createInstance(self, row)) end
-        loadIncludes(self, instances, args.include, function() onSuccess(instances) end, onError)
-    end, onError)
+    -- Serialize intent for cache
+    local cacheKeyData = sql_str
+    if bindings and #bindings > 0 then
+        for _, b in ipairs(bindings) do cacheKeyData = cacheKeyData .. ":" .. tostring(b.value) end
+    end
+    if args.include then
+        for k, _ in pairs(args.include) do cacheKeyData = cacheKeyData .. "+inc:" .. k end
+    end
+    
+    local cacheKey = self.db.cache:buildKey(self.name, "query", cacheKeyData)
+    
+    local function fallbackFunc(cbSuccess, cbError)
+        self.db:execute(sql_str, bindings, self._txKey, function(rows)
+            if not rows or #rows == 0 then cbSuccess({}) return end
+            local instances = {}
+            for _, row in ipairs(rows) do table.insert(instances, createInstance(self, row)) end
+            loadIncludes(self, instances, args.include, function() cbSuccess(instances) end, cbError)
+        end, cbError, 1)
+    end
+    
+    if self._txKey then
+        fallbackFunc(onSuccess, onError)
+    else
+        self.db.cache:dedupeAndCache(cacheKey, self.db.config.CacheTTL, fallbackFunc, onSuccess, onError)
+    end
 end
 
 function Model:update(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    local where_sql, bindingsW, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
     
-    local set_sql, errS = QueryBuilder.buildUpdate(self.db.driver, self.schema, args.data or args)
+    local set_sql, bindingsS, errS = QueryBuilder.buildUpdate(self.db.driver, self.schema, args.data or args)
     if errS then onError(errS) return end
+    
+    local bindings = {}
+    for _, b in ipairs(bindingsS) do table.insert(bindings, b) end
+    for _, b in ipairs(bindingsW) do table.insert(bindings, b) end
     
     local sql_str = string.format("UPDATE %s %s %s", self.name, set_sql, where_sql)
     
-    self.db:execute(sql_str, self._txKey, function()
+    self.db:execute(sql_str, bindings, self._txKey, function()
+        -- Hybrid Invalidation
+        local rowId = args.where[self.pk_col]
+        self.db.cache:invalidate(self.name, rowId)
+        
         self:findUnique({ where = args.where }, function(inst)
             if inst then onSuccess(inst) else onError({ code = "SPECTRUM_NOT_FOUND", message = "Record not found after update." }) end
         end, onError)
@@ -410,21 +462,27 @@ function Model:update(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end)
+    end, 1)
 end
 
 function Model:delete(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    local where_sql, bindings, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
     
     self:findUnique({ where = args.where }, function(inst)
         if not inst then onError({ code = "SPECTRUM_NOT_FOUND", message = "Record to delete not found." }) return end
         
         local sql_str = string.format("DELETE FROM %s %s", self.name, where_sql)
-        self.db:execute(sql_str, self._txKey, function() onSuccess(inst) end, onError)
+        self.db:execute(sql_str, bindings, self._txKey, function()
+            -- Hybrid Invalidation
+            local rowId = args.where[self.pk_col]
+            self.db.cache:invalidate(self.name, rowId)
+            
+            onSuccess(inst)
+        end, onError, 1)
     end, onError)
 end
 

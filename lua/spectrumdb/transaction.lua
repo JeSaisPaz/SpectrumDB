@@ -14,7 +14,7 @@ function TransactionCoordinator:transaction(func, onSuccess, onError)
         self.db.logger:error(err.message or "Transaction Error", err.traceback or debug.traceback()) 
     end
     
-    if self.db.driver.activeTx then
+    if self.db.scheduler.activeTx then
         onError({ 
             code = "SPECTRUM_NESTED_TRANSACTION_ERROR", 
             message = "Nested transactions are not supported by SpectrumDB." 
@@ -25,10 +25,13 @@ function TransactionCoordinator:transaction(func, onSuccess, onError)
     self._txCounter = self._txCounter + 1
     local txKey = "TX_" .. tostring(self._txCounter)
     
-    self.db.driver:execute("BEGIN TRANSACTION", txKey, function()
+    -- We set it optimistically so synchronous calls don't bypass
+    self.db.scheduler.activeTx = txKey
+
+    self.db:execute("BEGIN TRANSACTION", {}, txKey, function()
         local tx = {
-            execute = function(_, query_str, onExecSuccess, onExecError)
-                return self.db.driver:execute(query_str, txKey, onExecSuccess, onExecError)
+            execute = function(_, query_str, bindings, onExecSuccess, onExecError)
+                return self.db:execute(query_str, bindings, txKey, onExecSuccess, onExecError, 0)
             end
         }
         
@@ -42,17 +45,19 @@ function TransactionCoordinator:transaction(func, onSuccess, onError)
         end
         
         local function tx_commit()
-            self.db.driver:execute("COMMIT", txKey, function() 
+            self.db:execute("COMMIT", {}, txKey, function() 
                 onSuccess() 
-            end)
+            end, function(err)
+                onError(err)
+            end, 0)
         end
         
         local function tx_rollback(err)
-            self.db.driver:execute("ROLLBACK", txKey, function()
+            self.db:execute("ROLLBACK", {}, txKey, function()
                 onError(err)
-            end, function()
+            end, function(err2)
                 onError(err)
-            end)
+            end, 0)
         end
         
         local ok, ret = pcall(func, tx, tx_commit, tx_rollback)
@@ -61,8 +66,9 @@ function TransactionCoordinator:transaction(func, onSuccess, onError)
             return
         end
     end, function(begin_err)
+        self.db.scheduler.activeTx = nil
         onError(begin_err)
-    end)
+    end, 0)
 end
 
 return TransactionCoordinator

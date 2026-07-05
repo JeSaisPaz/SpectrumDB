@@ -6,16 +6,18 @@ end
 
 function QueryBuilder.buildWhere(driver, schema, where)
     if not where or next(where) == nil then
-        return "", nil
+        return "", {}, nil
     end
     
     local parts = {}
+    local bindings = {}
     local Types = driver.db_instance and driver.db_instance.Types or driver.db.Types
+    local dialect = driver.dialect
     
     for field, filter in pairs(where) do
         local fieldSchema = schema[field]
         if not fieldSchema then
-            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' is not defined in the schema." }
+            return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' is not defined in the schema." }
         end
         
         local dataType = fieldSchema.type
@@ -24,14 +26,11 @@ function QueryBuilder.buildWhere(driver, schema, where)
             for op, val in pairs(filter) do
                 if op == "gt" or op == "lt" or op == "gte" or op == "lte" then
                     if dataType == Types.VECTOR or dataType == Types.ANGLE then
-                        return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Comparisons (gt/lt/gte/lte) are not allowed on VECTOR or ANGLE types." }
+                        return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Comparisons (gt/lt/gte/lte) are not allowed on VECTOR or ANGLE types." }
                     end
                 end
                 
                 local sql_op
-                local sql_val, err = driver:escape(val, dataType)
-                if err then return nil, err end
-                
                 if op == "equals" then
                     sql_op = "="
                 elseif op == "not" then
@@ -46,106 +45,105 @@ function QueryBuilder.buildWhere(driver, schema, where)
                     sql_op = "<="
                 elseif op == "contains" then
                     sql_op = "LIKE"
-                    local escapedStr, esc_err = driver:escape(val, Types.STRING)
-                    if esc_err then return nil, esc_err end
-                    local inner = string.sub(escapedStr, 2, -2)
-                    sql_val = "'%" .. inner .. "%'"
+                    val = "%" .. tostring(val) .. "%"
+                    dataType = Types.STRING
                 elseif op == "in" then
-                    sql_op = "IN"
                     if type(val) ~= "table" then
-                        return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "'in' filter requires an array of values." }
+                        return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "'in' filter requires an array of values." }
                     end
-                    local escaped_list = {}
+                    local placeholders = {}
                     for _, list_val in ipairs(val) do
-                        local esc, list_err = driver:escape(list_val, dataType)
-                        if list_err then return nil, list_err end
-                        table.insert(escaped_list, esc)
+                        table.insert(placeholders, "?")
+                        table.insert(bindings, { value = list_val, type = dataType })
                     end
-                    sql_val = "(" .. table.concat(escaped_list, ", ") .. ")"
+                    table.insert(parts, string.format("%s IN (%s)", dialect.quoteIdent(field), table.concat(placeholders, ", ")))
+                    goto continue
                 else
-                    return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Unknown query operator: " .. tostring(op) }
+                    return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Unknown query operator: " .. tostring(op) }
                 end
                 
-                table.insert(parts, string.format("%s %s %s", driver.dialect.quoteIdent(field), sql_op, sql_val))
+                table.insert(parts, string.format("%s %s ?", dialect.quoteIdent(field), sql_op))
+                table.insert(bindings, { value = val, type = dataType })
+                
+                ::continue::
             end
         else
-            local sql_val, err = driver:escape(filter, dataType)
-            if err then return nil, err end
-            table.insert(parts, string.format("%s = %s", driver.dialect.quoteIdent(field), sql_val))
+            table.insert(parts, string.format("%s = ?", dialect.quoteIdent(field)))
+            table.insert(bindings, { value = filter, type = dataType })
         end
     end
     
     if #parts == 0 then
-        return "", nil
+        return "", {}, nil
     end
     
-    return "WHERE " .. table.concat(parts, " AND "), nil
+    return "WHERE " .. table.concat(parts, " AND "), bindings, nil
 end
 
 function QueryBuilder.buildInsert(driver, tableName, schema, data)
     local cols = {}
-    local vals = {}
+    local placeholders = {}
+    local bindings = {}
+    local dialect = driver.dialect
     
     for col, val in pairs(data) do
         local fieldSchema = schema[col]
         if not fieldSchema then
-            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
+            return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
         end
-        table.insert(cols, driver.dialect.quoteIdent(col))
-        local escaped_val, err = driver:escape(val, fieldSchema.type)
-        if err then return nil, err end
-        table.insert(vals, escaped_val)
+        table.insert(cols, dialect.quoteIdent(col))
+        table.insert(placeholders, "?")
+        table.insert(bindings, { value = val, type = fieldSchema.type })
     end
     
     for col, fieldSchema in pairs(schema) do
         if fieldSchema.required and data[col] == nil and fieldSchema.default == nil and not fieldSchema.autoIncrement then
-            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Missing required field '" .. col .. "'" }
+            return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Missing required field '" .. col .. "'" }
         end
     end
     
-    local sql = string.format("INSERT INTO %s (%s) VALUES (%s)", driver.dialect.quoteIdent(tableName), table.concat(cols, ", "), table.concat(vals, ", "))
-    return sql, nil
+    local sql = string.format("INSERT INTO %s (%s) VALUES (%s)", dialect.quoteIdent(tableName), table.concat(cols, ", "), table.concat(placeholders, ", "))
+    return sql, bindings, nil
 end
 
 function QueryBuilder.buildUpdate(driver, schema, data)
     local parts = {}
+    local bindings = {}
+    local dialect = driver.dialect
     
     for col, val in pairs(data) do
         local fieldSchema = schema[col]
         if not fieldSchema then
-            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
+            return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
         end
         
         local dataType = fieldSchema.type
+        local quotedCol = dialect.quoteIdent(col)
         
-        if type(val) == "table" and not (val.x and val.y) and not (val.p and val.r) then
-            local quotedCol = driver.dialect.quoteIdent(col)
+        if isTable(val) then
             if val.increment then
-                local esc, err = driver:escape(val.increment, dataType)
-                if err then return nil, err end
-                table.insert(parts, string.format("%s = %s + %s", quotedCol, quotedCol, esc))
+                table.insert(parts, string.format("%s = %s + ?", quotedCol, quotedCol))
+                table.insert(bindings, { value = val.increment, type = dataType })
             elseif val.decrement then
-                local esc, err = driver:escape(val.decrement, dataType)
-                if err then return nil, err end
-                table.insert(parts, string.format("%s = %s - %s", quotedCol, quotedCol, esc))
+                table.insert(parts, string.format("%s = %s - ?", quotedCol, quotedCol))
+                table.insert(bindings, { value = val.decrement, type = dataType })
             elseif val.multiply then
-                local esc, err = driver:escape(val.multiply, dataType)
-                if err then return nil, err end
-                table.insert(parts, string.format("%s = %s * %s", quotedCol, quotedCol, esc))
+                table.insert(parts, string.format("%s = %s * ?", quotedCol, quotedCol))
+                table.insert(bindings, { value = val.multiply, type = dataType })
             else
-                return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Unsupported update structure for column: " .. col }
+                return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Unsupported update structure for column: " .. col }
             end
         else
-            local escaped_val, err = driver:escape(val, dataType)
-            if err then return nil, err end
-            table.insert(parts, string.format("%s = %s", driver.dialect.quoteIdent(col), escaped_val))
+            table.insert(parts, string.format("%s = ?", quotedCol))
+            table.insert(bindings, { value = val, type = dataType })
         end
     end
     
-    return "SET " .. table.concat(parts, ", "), nil
+    return "SET " .. table.concat(parts, ", "), bindings, nil
 end
 
 function QueryBuilder.buildSelect(driver, schema, selectFields)
+    local dialect = driver.dialect
     if not selectFields or next(selectFields) == nil then
         return "*", nil
     end
@@ -164,7 +162,7 @@ function QueryBuilder.buildSelect(driver, schema, selectFields)
                 if not schema[col_name] then
                     return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col_name, message = "Column '" .. tostring(col_name) .. "' requested in select is not defined in the schema." }
                 end
-                table.insert(parts, driver.dialect.quoteIdent(col_name))
+                table.insert(parts, dialect.quoteIdent(col_name))
             end
         end
     end

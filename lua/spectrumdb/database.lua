@@ -19,6 +19,8 @@ local Logger = include("spectrumdb/logging.lua") or require("spectrumdb.logging"
 local TransactionCoordinator = include("spectrumdb/transaction.lua") or require("spectrumdb.transaction")
 local Model = include("spectrumdb/model.lua") or require("spectrumdb.model")
 local Migrator = include("spectrumdb/migrator.lua") or require("spectrumdb.migrator")
+local Scheduler = include("spectrumdb/scheduler.lua") or require("spectrumdb.scheduler")
+local Cache = include("spectrumdb/cache.lua") or require("spectrumdb.cache")
 
 function SpectrumDB.new(config)
     local instance = setmetatable({}, SpectrumDB)
@@ -34,6 +36,10 @@ function SpectrumDB.new(config)
     
     -- Instantiate Transaction Coordinator
     instance.txCoordinator = TransactionCoordinator.new(instance)
+    
+    -- Instantiate Gateway (Scheduler & Cache)
+    instance.scheduler = Scheduler.new(instance)
+    instance.cache = Cache.new(instance)
     
     -- Instantiate Driver
     local driverName = string.lower(instance.config.driver or "sqlite")
@@ -87,8 +93,14 @@ function SpectrumDB:defineModel(modelName, schema)
     return modelInstance
 end
 
-function SpectrumDB:execute(query_str, txKey, onSuccess, onError, priority)
-    return self.driver:execute(query_str, txKey, onSuccess, onError, priority)
+-- Internal API for models and transactions
+function SpectrumDB:execute(query_str, bindings, txKey, onSuccess, onError, priority)
+    self.scheduler:enqueue(query_str, bindings, priority, txKey, onSuccess, onError)
+end
+
+-- Escape Hatch for raw queries
+function SpectrumDB:rawQuery(query_str, bindings, priority, onSuccess, onError)
+    self.scheduler:enqueue(query_str, bindings, priority, nil, onSuccess, onError)
 end
 
 return SpectrumDB
