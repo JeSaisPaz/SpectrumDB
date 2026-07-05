@@ -182,47 +182,110 @@ local function loadIncludes(model, records, include, onSuccess, onError)
                         targetModel = setmetatable({ _txKey = model._txKey }, { __index = targetModel })
                     end
                     
+                    local includeArgs = type(relEnabled) == "table" and relEnabled or {}
+                    local baseWhere = includeArgs.where or {}
+                    
                     if rel.type == "belongsTo" then
+                        local fkValuesMap = {}
+                        local fkValues = {}
                         for _, record in ipairs(records) do
                             local fkVal = record[rel.foreignKey]
-                            if fkVal then
-                                pending = pending + 1
-                                targetModel:findUnique({
-                                    where = { [rel.targetField] = fkVal }
-                                }, function(parent)
-                                    if hasErrored then return end
-                                    rawget(record, "_data")[relName] = parent
-                                    pending = pending - 1
-                                    checkDone()
-                                end, function(err)
-                                    if not hasErrored then
-                                        hasErrored = true
-                                        onError(err)
-                                    end
-                                end)
-                            else
+                            if fkVal and not fkValuesMap[fkVal] then
+                                fkValuesMap[fkVal] = true
+                                table.insert(fkValues, fkVal)
+                            end
+                        end
+                        
+                        if #fkValues > 0 then
+                            local queryWhere = {}
+                            for k, v in pairs(baseWhere) do queryWhere[k] = v end
+                            queryWhere[rel.targetField] = { ["in"] = fkValues }
+                            
+                            local queryArgs = {
+                                where = queryWhere,
+                                select = includeArgs.select,
+                                orderBy = includeArgs.orderBy,
+                                limit = includeArgs.limit,
+                                offset = includeArgs.offset,
+                                include = includeArgs.include
+                            }
+                            
+                            pending = pending + 1
+                            targetModel:findMany(queryArgs, function(results)
+                                if hasErrored then return end
+                                local lookup = {}
+                                for _, res in ipairs(results or {}) do
+                                    lookup[res[rel.targetField]] = res
+                                end
+                                
+                                for _, record in ipairs(records) do
+                                    local fkVal = record[rel.foreignKey]
+                                    rawget(record, "_data")[relName] = fkVal and lookup[fkVal] or nil
+                                end
+                                
+                                pending = pending - 1
+                                checkDone()
+                            end, function(err)
+                                if not hasErrored then
+                                    hasErrored = true
+                                    onError(err)
+                                end
+                            end)
+                        else
+                            for _, record in ipairs(records) do
                                 rawget(record, "_data")[relName] = nil
                             end
                         end
                     elseif rel.type == "hasMany" then
+                        local pkValuesMap = {}
+                        local pkValues = {}
                         for _, record in ipairs(records) do
                             local pkVal = record[rel.targetField]
-                            if pkVal then
-                                pending = pending + 1
-                                targetModel:findMany({
-                                    where = { [rel.foreignKey] = pkVal }
-                                }, function(children)
-                                    if hasErrored then return end
-                                    rawget(record, "_data")[relName] = children or {}
-                                    pending = pending - 1
-                                    checkDone()
-                                end, function(err)
-                                    if not hasErrored then
-                                        hasErrored = true
-                                        onError(err)
-                                    end
-                                end)
-                            else
+                            if pkVal and not pkValuesMap[pkVal] then
+                                pkValuesMap[pkVal] = true
+                                table.insert(pkValues, pkVal)
+                            end
+                        end
+                        
+                        if #pkValues > 0 then
+                            local queryWhere = {}
+                            for k, v in pairs(baseWhere) do queryWhere[k] = v end
+                            queryWhere[rel.foreignKey] = { ["in"] = pkValues }
+                            
+                            local queryArgs = {
+                                where = queryWhere,
+                                select = includeArgs.select,
+                                orderBy = includeArgs.orderBy,
+                                limit = includeArgs.limit,
+                                offset = includeArgs.offset,
+                                include = includeArgs.include
+                            }
+                            
+                            pending = pending + 1
+                            targetModel:findMany(queryArgs, function(results)
+                                if hasErrored then return end
+                                local lookup = {}
+                                for _, res in ipairs(results or {}) do
+                                    local fkVal = res[rel.foreignKey]
+                                    if not lookup[fkVal] then lookup[fkVal] = {} end
+                                    table.insert(lookup[fkVal], res)
+                                end
+                                
+                                for _, record in ipairs(records) do
+                                    local pkVal = record[rel.targetField]
+                                    rawget(record, "_data")[relName] = pkVal and lookup[pkVal] or {}
+                                end
+                                
+                                pending = pending - 1
+                                checkDone()
+                            end, function(err)
+                                if not hasErrored then
+                                    hasErrored = true
+                                    onError(err)
+                                end
+                            end)
+                        else
+                            for _, record in ipairs(records) do
                                 rawget(record, "_data")[relName] = {}
                             end
                         end
