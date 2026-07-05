@@ -6,7 +6,7 @@ Designed to solve the prevalent server lag spikes associated with synchronous SQ
 
 ---
 
-## ⚡ Features
+## Features
 
 - **Intent-Driven Execution Engine**: SpectrumDB doesn't just pass queries to the database. It interprets them. If 10 different addons ask for the same player's data in the same 50ms window, SpectrumDB only executes **ONE** SQL query and shares the result, drastically reducing load.
 - **Time-Sliced Scheduler**: Queries are queued and processed under a strict `SysTime()` budget (default 5ms per server tick). This guarantees your server will never drop frames or freeze during a massive database spike.
@@ -18,11 +18,11 @@ Designed to solve the prevalent server lag spikes associated with synchronous SQ
 
 ---
 
-## 📚 Documentation & Guides
+## Documentation & Guides
 
 SpectrumDB features a comprehensive, Prisma-style documentation Wiki that covers everything from a 5-minute Quickstart to advanced execution techniques.
 
-**👉 [Read the Official Documentation (Wiki)](wiki/index.md)**
+**[Read the Official Documentation (Wiki)](wiki/index.md)**
 
 ### Table of Contents:
 1. **[Quickstart](wiki/Quickstart.md)**: Connect and write your first query in under 5 minutes.
