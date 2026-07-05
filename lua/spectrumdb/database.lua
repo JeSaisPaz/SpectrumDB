@@ -22,6 +22,16 @@ local Migrator = include("spectrumdb/migrator.lua") or require("spectrumdb.migra
 local Scheduler = include("spectrumdb/scheduler.lua") or require("spectrumdb.scheduler")
 local Cache = include("spectrumdb/cache.lua") or require("spectrumdb.cache")
 
+SpectrumDB._instances = {}
+
+function SpectrumDB.register(name, dbInstance)
+    SpectrumDB._instances[name] = dbInstance
+end
+
+function SpectrumDB.get(name)
+    return SpectrumDB._instances[name]
+end
+
 function SpectrumDB.new(config)
     local instance = setmetatable({}, SpectrumDB)
     instance.config = config or {}
@@ -91,6 +101,10 @@ function SpectrumDB:defineModel(modelName, schema)
     end
     
     return modelInstance
+end
+
+function SpectrumDB:getModel(modelName)
+    return self.models[modelName]
 end
 
 -- Internal API for models and transactions

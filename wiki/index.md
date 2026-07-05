@@ -32,6 +32,12 @@ Welcome to the **SpectrumDB** Wiki. SpectrumDB is a high-performance, intent-dri
 
 ---
 
+## 🔌 Ecosystem & Addons
+
+* [[Addon-Integration-Guide]]: Learn how to share a single SpectrumDB instance across multiple independent addons without needing MySQL credentials in every script.
+
+---
+
 ## 🏗️ Architecture & Logs (Legacy)
 *(Historical design decisions)*
 
