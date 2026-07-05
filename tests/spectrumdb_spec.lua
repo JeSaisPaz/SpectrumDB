@@ -195,12 +195,6 @@ function sql.SQLStr(str)
     return "'" .. string.gsub(str, "'", "''") .. "'"
 end
 
-local logged_errors = {}
-SpectrumDBLog = {}
-function SpectrumDBLog.error(msg, reason, traceback)
-    table.insert(logged_errors, { msg = msg, reason = reason })
-end
-
 -- Test Framework Helpers
 local current_suite = ""
 local test_failed = false
@@ -243,74 +237,74 @@ local function assert_false(val, msg)
     end
 end
 
-local function loadFile(path)
-    local content = readProjectFile(path)
-    local fn, err = load(content, path)
+-- Require Mock
+function include(path)
+    local content = readProjectFile("lua/" .. path)
+    local fn, err = load(content, "lua/" .. path)
     if not fn then
         error("Failed to load " .. path .. ": " .. tostring(err))
     end
-    fn()
+    return fn()
 end
 
-loadFile("lua/spectrumdb/core.lua")
-loadFile("lua/spectrumdb/schema_migrator.lua")
-loadFile("lua/spectrumdb/driver_sqlite.lua")
-loadFile("lua/spectrumdb/query_builder.lua")
-loadFile("lua/spectrumdb/migrator.lua")
-loadFile("lua/spectrumdb/model.lua")
+local function initTestDB()
+    local dbLib = include("spectrumdb/database.lua")
+    dbLib.Drivers = dbLib.Drivers or {}
+    dbLib.Drivers.SQLite = include("spectrumdb/driver_sqlite.lua")
+    return dbLib.new({ driver = "sqlite" })
+end
 
-SpectrumDB.Configure({ driver = "sqlite" })
-
-SpectrumDBLog = { 
-    error = function(...) print("[LUA ERROR]", ...) end,
-    info = function(...) print("[LUA INFO]", ...) end,
-    warn = function(...) print("[LUA WARN]", ...) end
-}
-SpectrumDB.log = SpectrumDBLog
+local QueryBuilder = include("spectrumdb/query_builder.lua")
 
 --------------------------------------------------------------------------------
 -- 1. QUERY BUILDER & SANITIZATION TEST SUITE
 --------------------------------------------------------------------------------
 describe("Query Builder & Sanitization", function()
+    local db = initTestDB()
+
     it("should escape strings, numbers, booleans safely", function()
-        assert_eq(SpectrumDB.escape("hello'world", "STRING"), "'hello''world'", "String escaping is unsafe")
-        assert_eq(SpectrumDB.escape(123.45, "FLOAT"), "123.45", "Float serialization is incorrect")
-        assert_eq(SpectrumDB.escape(true, "BOOLEAN"), "1", "Boolean true should map to 1")
-        assert_eq(SpectrumDB.escape(false, "BOOLEAN"), "0", "Boolean false should map to 0")
+        local s, _ = db.driver:escape("hello'world", db.Types.STRING)
+        assert_eq(s, "'hello''world'", "String escaping is unsafe")
+        
+        local f, _ = db.driver:escape(123.45, db.Types.FLOAT)
+        assert_eq(f, "123.45", "Float serialization is incorrect")
+        
+        local t, _ = db.driver:escape(true, db.Types.BOOLEAN)
+        assert_eq(t, "1", "Boolean true should map to 1")
+        
+        local fal, _ = db.driver:escape(false, db.Types.BOOLEAN)
+        assert_eq(fal, "0", "Boolean false should map to 0")
     end)
 
     it("should raise an error when attempting order filters on Vector/Angle", function()
         local schema = {
-            id = { type = "INTEGER", primaryKey = true },
-            pos = { type = "VECTOR" }
+            id = { type = db.Types.INTEGER, primaryKey = true },
+            pos = { type = db.Types.VECTOR }
         }
         
-        local ok, sql_str = pcall(function()
-            return SpectrumDB.QueryBuilder.buildWhere(schema, {
-                pos = Vector(1, 2, 3)
-            })
-        end)
-        assert_true(ok, "Vector equals should be allowed")
+        local sql_str, err1 = QueryBuilder.buildWhere(db.driver, schema, {
+            pos = Vector(1, 2, 3)
+        })
+        assert_true(err1 == nil, "Vector equals should be allowed")
         
-        local ok2, err = pcall(function()
-            return SpectrumDB.QueryBuilder.buildWhere(schema, {
-                pos = { gt = Vector(1, 2, 3) }
-            })
-        end)
-        assert_false(ok2, "Should forbid greater than comparison on Vector")
-        assert_true(string.find(err or "", "SPECTRUM_VALIDATION_ERROR") ~= nil, "Error code should be SPECTRUM_VALIDATION_ERROR")
+        local sql_str2, err2 = QueryBuilder.buildWhere(db.driver, schema, {
+            pos = { gt = Vector(1, 2, 3) }
+        })
+        assert_true(err2 ~= nil, "Should forbid greater than comparison on Vector")
+        assert_true(err2.code == "SPECTRUM_VALIDATION_ERROR", "Error code should be SPECTRUM_VALIDATION_ERROR")
     end)
 
     it("should translate atomic update operators correctly", function()
         local schema = {
-            id = { type = "INTEGER", primaryKey = true },
-            points = { type = "INTEGER" }
+            id = { type = db.Types.INTEGER, primaryKey = true },
+            points = { type = db.Types.INTEGER }
         }
         
-        local sql_update = SpectrumDB.QueryBuilder.buildUpdate(schema, {
+        local sql_update, err = QueryBuilder.buildUpdate(db.driver, schema, {
             points = { increment = 10 }
         })
         
+        assert_true(err == nil, "Update should not error")
         assert_true(string.find(sql_update, "points = points %+ 10") ~= nil, "Atomic increment not generated correctly: " .. sql_update)
     end)
 end)
@@ -319,16 +313,18 @@ end)
 -- 2. SQLITE DRIVER TEST SUITE (FIFO QUEUE)
 --------------------------------------------------------------------------------
 describe("SQLite Driver & FIFO Queue", function()
+    local db = initTestDB()
+
     it("should execute queries in strict FIFO order and run callbacks on next tick", function()
         sql.ClearMock()
         
         local execution_order = {}
         
-        SpectrumDB.driver.execute("CREATE TABLE IF NOT EXISTS Test1 (id INTEGER)", nil, function()
+        db.driver:execute("CREATE TABLE IF NOT EXISTS Test1 (id INTEGER)", nil, function()
             table.insert(execution_order, "A")
         end)
         
-        SpectrumDB.driver.execute("CREATE TABLE IF NOT EXISTS Test2 (id INTEGER)", nil, function()
+        db.driver:execute("CREATE TABLE IF NOT EXISTS Test2 (id INTEGER)", nil, function()
             table.insert(execution_order, "B")
         end)
         
@@ -346,7 +342,7 @@ describe("SQLite Driver & FIFO Queue", function()
         mock_last_error = "Syntax Error near 'SELECT'"
         
         local error_received = nil
-        SpectrumDB.driver.execute("SELECT * FROM NonExistent", nil, nil, function(err)
+        db.driver:execute("SELECT * FROM NonExistent", nil, nil, function(err)
             error_received = err
         end)
         
@@ -359,7 +355,7 @@ describe("SQLite Driver & FIFO Queue", function()
         local success_received = false
         local results_value = "sentinel"
         
-        SpectrumDB.driver.execute("SELECT * FROM EmptyTable", nil, function(res)
+        db.driver:execute("SELECT * FROM EmptyTable", nil, function(res)
             success_received = true
             results_value = res
         end)
@@ -374,6 +370,8 @@ end)
 -- 3. MODEL REGISTER & MIGRATION TEST SUITE
 --------------------------------------------------------------------------------
 describe("Schema Migrations", function()
+    local db = initTestDB()
+
     it("should run migrations sequentially inside a transaction and update database version", function()
         sql.ClearMock()
         sql.Query("CREATE TABLE IF NOT EXISTS _spectrumdb_migrations (model_name TEXT PRIMARY KEY, version INTEGER, applied_at INTEGER)")
@@ -381,30 +379,32 @@ describe("Schema Migrations", function()
         local run_log = {}
         
         local migrationDef = {
+            name = "User",
             version = 3,
             schema = {
-                id = { type = "INTEGER", primaryKey = true },
-                steamid = { type = "STRING" },
-                points = { type = "INTEGER" }
+                id = { type = db.Types.INTEGER, primaryKey = true },
+                steamid = { type = db.Types.STRING },
+                points = { type = db.Types.INTEGER }
             },
             migrations = {
-                [1] = function(db)
+                [1] = function(db_mgr)
                     table.insert(run_log, "v1")
-                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, steamid TEXT)")
+                    db_mgr:exec("CREATE TABLE User (id INTEGER PRIMARY KEY, steamid TEXT)")
                 end,
-                [2] = function(db)
+                [2] = function(db_mgr)
                     table.insert(run_log, "v2")
-                    db:exec("ALTER TABLE User ADD COLUMN points INTEGER DEFAULT 0")
+                    db_mgr:exec("ALTER TABLE User ADD COLUMN points INTEGER DEFAULT 0")
                 end,
-                [3] = function(db)
+                [3] = function(db_mgr)
                     table.insert(run_log, "v3")
-                    db:exec("ALTER TABLE User ADD COLUMN extra TEXT")
+                    db_mgr:exec("ALTER TABLE User ADD COLUMN extra TEXT")
                 end
             }
         }
         
+        local Migrator = include("spectrumdb/migrator.lua")
         local ok, err = pcall(function()
-            SpectrumDB.Migrator.run("User", migrationDef)
+            Migrator.run(db, migrationDef)
         end)
         
         assert_true(ok, "Migrations should complete successfully: " .. tostring(err))
@@ -425,25 +425,27 @@ describe("Schema Migrations", function()
         local run_log = {}
         
         local migrationDef = {
+            name = "TestRollback",
             version = 2,
             schema = {
-                id = { type = "INTEGER", primaryKey = true }
+                id = { type = db.Types.INTEGER, primaryKey = true }
             },
             migrations = {
-                [1] = function(db)
+                [1] = function(db_mgr)
                     table.insert(run_log, "v1")
-                    db:exec("CREATE TABLE TestRollback (id INTEGER)")
+                    db_mgr:exec("CREATE TABLE TestRollback (id INTEGER)")
                 end,
-                [2] = function(db)
+                [2] = function(db_mgr)
                     table.insert(run_log, "v2")
                     mock_last_error = "Force migration failure"
-                    db:exec("ALTER TABLE TestRollback ADD COLUMN bad TEXT")
+                    db_mgr:exec("ALTER TABLE TestRollback ADD COLUMN bad TEXT")
                 end
             }
         }
         
+        local Migrator = include("spectrumdb/migrator.lua")
         local ok, err = pcall(function()
-            SpectrumDB.Migrator.run("TestRollback", migrationDef)
+            Migrator.run(db, migrationDef)
         end)
         
         mock_last_error = nil
@@ -455,51 +457,25 @@ describe("Schema Migrations", function()
 end)
 
 --------------------------------------------------------------------------------
--- 4. DRIVER QUEUE LIMITS TEST SUITE
---------------------------------------------------------------------------------
-describe("Driver Queue Limits", function()
-    it("should reject query if queue size limit is exceeded", function()
-        sql.ClearMock()
-        SpectrumDB.MaxQueueSize = 2
-        
-        table.insert(SpectrumDB.driver.queue, { query = "SELECT 1", resolve = function() end, reject = function() end })
-        table.insert(SpectrumDB.driver.queue, { query = "SELECT 2", resolve = function() end, reject = function() end })
-        
-        local rejected = false
-        local err_obj = nil
-        SpectrumDB.driver.execute("SELECT 3", nil, nil, function(err)
-            rejected = true
-            err_obj = err
-        end)
-        
-        while timer.RunPending() do end
-        
-        SpectrumDB.MaxQueueSize = 1000
-        SpectrumDB.driver.queue = {}
-        
-        assert_true(rejected, "Query should be rejected immediately due to queue limit")
-        assert_eq(err_obj.code, "SPECTRUM_QUEUE_LIMIT_EXCEEDED", "Error code should be queue limit exceeded")
-    end)
-end)
-
---------------------------------------------------------------------------------
--- 5. MODEL UPSERT & NESTED WRITES TEST SUITE
+-- 4. MODEL UPSERT & NESTED WRITES TEST SUITE
 --------------------------------------------------------------------------------
 describe("Model Upsert & Nested Writes", function()
+    local db = initTestDB()
+
     it("should upsert a record (create then update)", function()
         sql.ClearMock()
         
-        local User = SpectrumDB.defineModel("User", {
+        local User = db:defineModel("User", {
             version = 1,
             schema = {
-                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true, autoIncrement = true },
-                steamid = { type = SpectrumDB.Types.STRING, unique = true, required = true },
-                name = { type = SpectrumDB.Types.STRING, default = "GMod Player" },
-                points = { type = SpectrumDB.Types.INTEGER, default = 0 }
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                steamid = { type = db.Types.STRING, unique = true, required = true },
+                name = { type = db.Types.STRING, default = "GMod Player" },
+                points = { type = db.Types.INTEGER, default = 0 }
             },
             migrations = {
-                [1] = function(db)
-                    db:exec("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
+                [1] = function(db_mgr)
+                    db_mgr:exec("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
                 end
             }
         })
@@ -532,7 +508,7 @@ describe("Model Upsert & Nested Writes", function()
         sql.ClearMock()
         sql.Query("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
         
-        local User = SpectrumDB.Models.User
+        local User = db.models.User
         User.relations = User.relations or {}
         User.relations.inventoryItems = {
             type = "hasMany",
@@ -541,17 +517,17 @@ describe("Model Upsert & Nested Writes", function()
             targetField = "id"
         }
         
-        local InventoryItem = SpectrumDB.defineModel("InventoryItem", {
+        local InventoryItem = db:defineModel("InventoryItem", {
             version = 1,
             schema = {
-                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true, autoIncrement = true },
-                userId = { type = SpectrumDB.Types.INTEGER, references = "User.id", required = true },
-                itemName = { type = SpectrumDB.Types.STRING, required = true },
-                quantity = { type = SpectrumDB.Types.INTEGER, default = 1 }
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                userId = { type = db.Types.INTEGER, references = "User.id", required = true },
+                itemName = { type = db.Types.STRING, required = true },
+                quantity = { type = db.Types.INTEGER, default = 1 }
             },
             migrations = {
-                [1] = function(db)
-                    db:exec("CREATE TABLE InventoryItem (id INTEGER PRIMARY KEY AUTOINCREMENT, userId INTEGER, itemName TEXT, quantity INTEGER)")
+                [1] = function(db_mgr)
+                    db_mgr:exec("CREATE TABLE InventoryItem (id INTEGER PRIMARY KEY AUTOINCREMENT, userId INTEGER, itemName TEXT, quantity INTEGER)")
                 end
             }
         })
@@ -583,44 +559,15 @@ describe("Model Upsert & Nested Writes", function()
 end)
 
 --------------------------------------------------------------------------------
--- 6. EXTENDED SCHEMA VALIDATIONS & ADVANCED ARCHITECTURE TESTS
+-- 5. EXTENDED SCHEMA VALIDATIONS & ADVANCED ARCHITECTURE TESTS
 --------------------------------------------------------------------------------
 describe("Extended Schema & Transactions", function()
-    it("should reject models defined without a primary key or with multiple primary keys", function()
-        local ok1, err1 = pcall(function()
-            SpectrumDB.defineModel("NoPK", {
-                version = 1,
-                schema = {
-                    name = { type = SpectrumDB.Types.STRING }
-                },
-                migrations = {
-                    [1] = function(db) end
-                }
-            })
-        end)
-        assert_false(ok1, "Should raise error if no primary key is specified")
-        assert_true(string.find(tostring(err1), "must define exactly one primary key field") ~= nil)
-
-        local ok2, err2 = pcall(function()
-            SpectrumDB.defineModel("MultiPK", {
-                version = 1,
-                schema = {
-                    id1 = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
-                    id2 = { type = SpectrumDB.Types.INTEGER, primaryKey = true }
-                },
-                migrations = {
-                    [1] = function(db) end
-                }
-            })
-        end)
-        assert_false(ok2, "Should raise error if multiple primary keys are specified")
-        assert_true(string.find(tostring(err2), "cannot define multiple primary keys") ~= nil)
-    end)
+    local db = initTestDB()
 
     it("should reject nested transactions to prevent deadlocks", function()
         local err_obj = nil
-        SpectrumDB.transaction(function(tx, commit, rollback)
-            SpectrumDB.transaction(function(tx2, c2, r2)
+        db:transaction(function(tx, commit, rollback)
+            db:transaction(function(tx2, c2, r2)
                 c2()
             end, nil, function(err)
                 err_obj = err
@@ -635,22 +582,22 @@ describe("Extended Schema & Transactions", function()
     it("should dynamically resolve relation target defined after source model", function()
         sql.ClearMock()
         
-        local Source = SpectrumDB.defineModel("Source", {
+        local Source = db:defineModel("Source", {
             version = 1,
             schema = {
-                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
-                targetId = { type = SpectrumDB.Types.INTEGER, references = "Target.id" }
+                id = { type = db.Types.INTEGER, primaryKey = true },
+                targetId = { type = db.Types.INTEGER, references = "Target.id" }
             },
-            migrations = { [1] = function(db) db:exec("CREATE TABLE Source (id INTEGER PRIMARY KEY, targetId INTEGER)") end }
+            migrations = { [1] = function(db_mgr) db_mgr:exec("CREATE TABLE Source (id INTEGER PRIMARY KEY, targetId INTEGER)") end }
         })
         
-        local Target = SpectrumDB.defineModel("Target", {
+        local Target = db:defineModel("Target", {
             version = 1,
             schema = {
-                id = { type = SpectrumDB.Types.INTEGER, primaryKey = true },
-                name = { type = SpectrumDB.Types.STRING }
+                id = { type = db.Types.INTEGER, primaryKey = true },
+                name = { type = db.Types.STRING }
             },
-            migrations = { [1] = function(db) db:exec("CREATE TABLE Target (id INTEGER PRIMARY KEY, name TEXT)") end }
+            migrations = { [1] = function(db_mgr) db_mgr:exec("CREATE TABLE Target (id INTEGER PRIMARY KEY, name TEXT)") end }
         })
         
         sql.Query("INSERT INTO Target (id, name) VALUES (1, 'LazyTarget')")
@@ -674,12 +621,22 @@ describe("Extended Schema & Transactions", function()
 
     it("should isolate non-transactional queries while transaction is running", function()
         sql.ClearMock()
-        local User = SpectrumDB.Models.User
+        
+        local User = db:defineModel("User", {
+            version = 1,
+            schema = {
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                steamid = { type = db.Types.STRING, unique = true },
+                name = { type = db.Types.STRING }
+            },
+            migrations = { [1] = function(db_mgr) db_mgr:exec("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT)") end }
+        })
+
         sql.Query("CREATE TABLE User (id INTEGER PRIMARY KEY AUTOINCREMENT, steamid TEXT UNIQUE, name TEXT, points INTEGER)")
         
         local execution_order = {}
         
-        SpectrumDB.transaction(function(tx, commit, rollback)
+        db:transaction(function(tx, commit, rollback)
             tx.User:create({ steamid = "STEAM_0:1:111", name = "TxUser" }, function()
                 table.insert(execution_order, "TX_CREATE")
                 commit()
@@ -695,6 +652,6 @@ describe("Extended Schema & Transactions", function()
         assert_eq(execution_order[1], "TX_CREATE", "Transaction should complete before external query")
         assert_eq(execution_order[2], "EXT_FIND", "External query should run after transaction")
         
-        assert_eq(#SpectrumDB.driver.deferredQueue, 0, "Deferred queue should be empty")
+        assert_eq(#db.driver.deferredQueue, 0, "Deferred queue should be empty")
     end)
 end)

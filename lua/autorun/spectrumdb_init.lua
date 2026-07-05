@@ -27,22 +27,15 @@
 --]]
 
 if SERVER then
-    SpectrumDB = SpectrumDB or {}
-
-    -- Autoloader for SpectrumDB
-    local files = {
-        "spectrumdb/core.lua",
-        "spectrumdb/driver_sqlite.lua",
-        "spectrumdb/driver_mysqloo.lua",
-        "spectrumdb/query_builder.lua",
-        "spectrumdb/schema_migrator.lua",
-        "spectrumdb/migrator.lua",
-        "spectrumdb/model.lua"
-    }
-
-    for _, file in ipairs(files) do
-        include(file)
-    end
+    -- Load core architecture
+    local Database = include("spectrumdb/database.lua")
+    
+    -- Load and register drivers globally under the Database class
+    Database.Drivers.SQLite = include("spectrumdb/driver_sqlite.lua")
+    Database.Drivers.MySQLOO = include("spectrumdb/driver_mysqloo.lua")
+    
+    -- Expose SpectrumDB globally for instantiation
+    SpectrumDB = Database
 
     if MsgC and Color then
         local c_cyan   = Color(0, 255, 255)

@@ -1,18 +1,18 @@
-SpectrumDB = SpectrumDB or {}
+local SchemaMigrator = {}
 
-SpectrumDB.SchemaMigrator = {}
-
-local function generateColumnDef(colName, fieldSchema, dialect)
+local function generateColumnDef(driver, colName, fieldSchema)
+    local dialect = driver.dialect
+    local Types = driver.db_instance and driver.db_instance.Types or driver.db.Types
     local colDef = { dialect.quoteIdent(colName) }
     
     local typeStr = fieldSchema.type
-    if dialect.booleanType and fieldSchema.type == SpectrumDB.Types.BOOLEAN then
+    if dialect.booleanType and fieldSchema.type == Types.BOOLEAN then
         typeStr = dialect.booleanType
-    elseif dialect.jsonType and fieldSchema.type == SpectrumDB.Types.JSON then
+    elseif dialect.jsonType and fieldSchema.type == Types.JSON then
         typeStr = dialect.jsonType
-    elseif fieldSchema.type == SpectrumDB.Types.STRING then
+    elseif fieldSchema.type == Types.STRING then
         typeStr = "TEXT"
-    elseif fieldSchema.type == SpectrumDB.Types.VECTOR or fieldSchema.type == SpectrumDB.Types.ANGLE then
+    elseif fieldSchema.type == Types.VECTOR or fieldSchema.type == Types.ANGLE then
         typeStr = "TEXT"
     end
     
@@ -36,7 +36,8 @@ local function generateColumnDef(colName, fieldSchema, dialect)
         
         if fieldSchema.default ~= nil then
             local defType = fieldSchema.type
-            local valStr = SpectrumDB.driver.escape(fieldSchema.default, defType)
+            local valStr, err = driver:escape(fieldSchema.default, defType)
+            if err then return nil, err end
             table.insert(colDef, "DEFAULT " .. valStr)
         end
         
@@ -45,17 +46,15 @@ local function generateColumnDef(colName, fieldSchema, dialect)
         end
     end
     
-    return table.concat(colDef, " ")
+    return table.concat(colDef, " "), nil
 end
 
-function SpectrumDB.SchemaMigrator.generate(modelName, schema, dialect)
+function SchemaMigrator.generate(driver, modelName, schema)
+    local dialect = driver.dialect
     local lines = {}
     local pks = {}
     local fks = {}
     
-    -- Ensure predictable column order for tests, or just iterate (pairs)
-    -- For real usage, Lua's pairs is unordered, but that's valid for SQL CREATE TABLE.
-    -- However, to make tests pass reliably, let's sort keys if id is present.
     local keys = {}
     for k in pairs(schema) do table.insert(keys, k) end
     table.sort(keys, function(a, b)
@@ -66,7 +65,9 @@ function SpectrumDB.SchemaMigrator.generate(modelName, schema, dialect)
     
     for _, colName in ipairs(keys) do
         local fieldSchema = schema[colName]
-        table.insert(lines, generateColumnDef(colName, fieldSchema, dialect))
+        local colDefStr, err = generateColumnDef(driver, colName, fieldSchema)
+        if err then return nil, err end
+        table.insert(lines, colDefStr)
         
         if fieldSchema.primaryKey and not dialect.primaryKeyInline then
             table.insert(pks, dialect.quoteIdent(colName))
@@ -98,15 +99,22 @@ function SpectrumDB.SchemaMigrator.generate(modelName, schema, dialect)
         end
     end
     
-    return string.format("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", 
+    local sql = string.format("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", 
         dialect.quoteIdent(modelName), 
         table.concat(lines, ",\n  ")
     )
+    return sql, nil
 end
 
-function SpectrumDB.SchemaMigrator.generateAlterAddColumn(modelName, colName, fieldSchema, dialect)
-    return string.format("ALTER TABLE %s ADD COLUMN %s", 
+function SchemaMigrator.generateAlterAddColumn(driver, modelName, colName, fieldSchema)
+    local dialect = driver.dialect
+    local colDef, err = generateColumnDef(driver, colName, fieldSchema)
+    if err then return nil, err end
+    local sql = string.format("ALTER TABLE %s ADD COLUMN %s", 
         dialect.quoteIdent(modelName),
-        generateColumnDef(colName, fieldSchema, dialect)
+        colDef
     )
+    return sql, nil
 end
+
+return SchemaMigrator

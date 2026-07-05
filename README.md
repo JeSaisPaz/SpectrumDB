@@ -21,7 +21,6 @@ It provides a lightweight callback-based API, schema validation, CRUD operations
 
 Place the files in your Garry's Mod server's `addons` directory:
 
-```
 garrysmod/addons/spectrumdb/
 ├── LICENSE
 ├── README.md
@@ -29,13 +28,15 @@ garrysmod/addons/spectrumdb/
     ├── autorun/
     │   └── spectrumdb_init.lua
     └── spectrumdb/
-        ├── core.lua
+        ├── database.lua
         ├── driver_sqlite.lua
         ├── driver_mysqloo.lua
         ├── schema_migrator.lua
         ├── migrator.lua
         ├── model.lua
-        └── query_builder.lua
+        ├── query_builder.lua
+        ├── transaction.lua
+        └── logging.lua
 ```
 
 ---
@@ -44,11 +45,13 @@ garrysmod/addons/spectrumdb/
 
 ### 1. Configuration & Driver Setup
 
-SpectrumDB allows you to select your backend database before executing any queries. By default, it runs on standard SQLite.
+SpectrumDB allows you to instantiate independent database connections, making it easy to use multiple databases concurrently. By default, it runs on standard SQLite.
 
 ```lua
--- Configure a MySQLOO Backend
-SpectrumDB.Configure({
+local SpectrumDB = include("spectrumdb/database.lua")
+
+-- Configure a MySQLOO Backend Instance
+local db = SpectrumDB.new({
     driver = "mysqloo",
     host = "127.0.0.1",
     port = 3306,
@@ -60,10 +63,10 @@ SpectrumDB.Configure({
 
 ### 2. Model Definition
 
-Define your schema and versions. SpectrumDB will automatically generate `CREATE TABLE` and `ALTER TABLE` SQL dialect syntaxes.
+Define your schema and versions against your database instance. SpectrumDB will automatically generate `CREATE TABLE` and `ALTER TABLE` SQL dialect syntaxes.
 
 ```lua
-local User = SpectrumDB.defineModel("User", {
+local User = db:defineModel("User", {
     version = 1,
     
     schema = {
@@ -125,10 +128,10 @@ end)
 
 ### 4. Transactions
 
-SpectrumDB transactions use a standard callback signature with explicit `commit()` and `rollback()` invocations. This ensures that the transaction remains locked while your nested async callbacks execute safely.
+SpectrumDB transactions use a standard callback signature with explicit `commit()` and `rollback()` invocations. This ensures that the transaction remains locked while your nested async callbacks execute safely. Transactions are scoped to the database instance.
 
 ```lua
-SpectrumDB.transaction(function(tx, commit, rollback)
+db:transaction(function(tx, commit, rollback)
     tx.User:create({
         data = { steamid = "STEAM_0:1:777", xp = 0 }
     }, function(user)

@@ -1,179 +1,157 @@
-SpectrumDB = SpectrumDB or {}
-
 local QueryBuilder = {}
-SpectrumDB.QueryBuilder = QueryBuilder
-
--- Central escape function delegation
-function SpectrumDB.escape(val, dataType)
-    if not SpectrumDB.driver then
-        error("SPECTRUM_SQL_ERROR: No driver is loaded to escape values.")
-    end
-    return SpectrumDB.driver.escape(val, dataType)
-end
-
-function SpectrumDB.raw(sql_str, txKey, onSuccess, onError)
-    if not SpectrumDB.driver then
-        if onError then onError({ code = "SPECTRUM_SQL_ERROR", message = "No driver is loaded." }) end
-        return
-    end
-    SpectrumDB.driver.execute(sql_str, txKey, onSuccess, onError)
-end
 
 local function isTable(t)
-    return type(t) == "table" and not (t.x and t.y) and not (t.p and t.r) -- Not GMod Vector or Angle
+    return type(t) == "table" and not (t.x and t.y) and not (t.p and t.r)
 end
 
--- Validate and build WHERE clause
-function QueryBuilder.buildWhere(schema, where)
+function QueryBuilder.buildWhere(driver, schema, where)
     if not where or next(where) == nil then
-        return ""
+        return "", nil
     end
     
     local parts = {}
+    local Types = driver.db_instance and driver.db_instance.Types or driver.db.Types
     
     for field, filter in pairs(where) do
         local fieldSchema = schema[field]
         if not fieldSchema then
-            error("SPECTRUM_VALIDATION_ERROR: Field '" .. tostring(field) .. "' is not defined in the schema.")
+            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' is not defined in the schema." }
         end
         
         local dataType = fieldSchema.type
         
         if isTable(filter) then
-            -- Detailed operator filters e.g. { gt = 5 }
             for op, val in pairs(filter) do
                 if op == "gt" or op == "lt" or op == "gte" or op == "lte" then
-                    -- Prevent order/range filtering on Vector and Angle types
-                    if dataType == SpectrumDB.Types.VECTOR or dataType == SpectrumDB.Types.ANGLE then
-                        error("SPECTRUM_VALIDATION_ERROR: Comparisons (gt/lt/gte/lte) are not allowed on VECTOR or ANGLE types.")
+                    if dataType == Types.VECTOR or dataType == Types.ANGLE then
+                        return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Comparisons (gt/lt/gte/lte) are not allowed on VECTOR or ANGLE types." }
                     end
                 end
                 
                 local sql_op
-                local sql_val
+                local sql_val, err = driver:escape(val, dataType)
+                if err then return nil, err end
                 
                 if op == "equals" then
                     sql_op = "="
-                    sql_val = SpectrumDB.escape(val, dataType)
                 elseif op == "not" then
                     sql_op = "!="
-                    sql_val = SpectrumDB.escape(val, dataType)
                 elseif op == "gt" then
                     sql_op = ">"
-                    sql_val = SpectrumDB.escape(val, dataType)
                 elseif op == "gte" then
                     sql_op = ">="
-                    sql_val = SpectrumDB.escape(val, dataType)
                 elseif op == "lt" then
                     sql_op = "<"
-                    sql_val = SpectrumDB.escape(val, dataType)
                 elseif op == "lte" then
                     sql_op = "<="
-                    sql_val = SpectrumDB.escape(val, dataType)
                 elseif op == "contains" then
                     sql_op = "LIKE"
-                    local escapedStr = SpectrumDB.escape(val, SpectrumDB.Types.STRING)
-                    -- Strip GMod sql.SQLStr quotes to wrap with wildcard percent signs
+                    local escapedStr, esc_err = driver:escape(val, Types.STRING)
+                    if esc_err then return nil, esc_err end
                     local inner = string.sub(escapedStr, 2, -2)
                     sql_val = "'%" .. inner .. "%'"
                 elseif op == "in" then
                     sql_op = "IN"
                     if type(val) ~= "table" then
-                        error("SPECTRUM_VALIDATION_ERROR: 'in' filter requires an array of values.")
+                        return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "'in' filter requires an array of values." }
                     end
                     local escaped_list = {}
                     for _, list_val in ipairs(val) do
-                        table.insert(escaped_list, SpectrumDB.escape(list_val, dataType))
+                        local esc, list_err = driver:escape(list_val, dataType)
+                        if list_err then return nil, list_err end
+                        table.insert(escaped_list, esc)
                     end
                     sql_val = "(" .. table.concat(escaped_list, ", ") .. ")"
                 else
-                    error("SPECTRUM_VALIDATION_ERROR: Unknown query operator: " .. tostring(op))
+                    return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Unknown query operator: " .. tostring(op) }
                 end
                 
-                table.insert(parts, string.format("%s %s %s", SpectrumDB.driver.dialect.quoteIdent(field), sql_op, sql_val))
+                table.insert(parts, string.format("%s %s %s", driver.dialect.quoteIdent(field), sql_op, sql_val))
             end
         else
-            -- Simple exact match filter e.g. { steamid = "STEAM_0:1" }
-            local sql_val = SpectrumDB.escape(filter, dataType)
-            table.insert(parts, string.format("%s = %s", SpectrumDB.driver.dialect.quoteIdent(field), sql_val))
+            local sql_val, err = driver:escape(filter, dataType)
+            if err then return nil, err end
+            table.insert(parts, string.format("%s = %s", driver.dialect.quoteIdent(field), sql_val))
         end
     end
     
     if #parts == 0 then
-        return ""
+        return "", nil
     end
     
-    return "WHERE " .. table.concat(parts, " AND ")
+    return "WHERE " .. table.concat(parts, " AND "), nil
 end
 
--- Validate and build INSERT clause
-function QueryBuilder.buildInsert(tableName, schema, data)
+function QueryBuilder.buildInsert(driver, tableName, schema, data)
     local cols = {}
     local vals = {}
     
     for col, val in pairs(data) do
         local fieldSchema = schema[col]
         if not fieldSchema then
-            error("SPECTRUM_VALIDATION_ERROR: Column '" .. tostring(col) .. "' is not defined in the schema.")
+            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
         end
-        table.insert(cols, SpectrumDB.driver.dialect.quoteIdent(col))
-        table.insert(vals, SpectrumDB.escape(val, fieldSchema.type))
+        table.insert(cols, driver.dialect.quoteIdent(col))
+        local escaped_val, err = driver:escape(val, fieldSchema.type)
+        if err then return nil, err end
+        table.insert(vals, escaped_val)
     end
     
-    -- Check for missing required fields without defaults
     for col, fieldSchema in pairs(schema) do
         if fieldSchema.required and data[col] == nil and fieldSchema.default == nil and not fieldSchema.autoIncrement then
-            error("SPECTRUM_VALIDATION_ERROR: Missing required field '" .. col .. "'")
+            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Missing required field '" .. col .. "'" }
         end
     end
     
-    return string.format("INSERT INTO %s (%s) VALUES (%s)", SpectrumDB.driver.dialect.quoteIdent(tableName), table.concat(cols, ", "), table.concat(vals, ", "))
+    local sql = string.format("INSERT INTO %s (%s) VALUES (%s)", driver.dialect.quoteIdent(tableName), table.concat(cols, ", "), table.concat(vals, ", "))
+    return sql, nil
 end
 
--- Validate and build UPDATE clause (supports atomic operators)
-function QueryBuilder.buildUpdate(schema, data)
+function QueryBuilder.buildUpdate(driver, schema, data)
     local parts = {}
     
     for col, val in pairs(data) do
         local fieldSchema = schema[col]
         if not fieldSchema then
-            error("SPECTRUM_VALIDATION_ERROR: Column '" .. tostring(col) .. "' is not defined in the schema.")
+            return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
         end
         
         local dataType = fieldSchema.type
         
         if type(val) == "table" and not (val.x and val.y) and not (val.p and val.r) then
-            -- Check for atomic updates (increment, decrement, multiply)
-            local quotedCol = SpectrumDB.driver.dialect.quoteIdent(col)
+            local quotedCol = driver.dialect.quoteIdent(col)
             if val.increment then
-                local esc = SpectrumDB.escape(val.increment, dataType)
+                local esc, err = driver:escape(val.increment, dataType)
+                if err then return nil, err end
                 table.insert(parts, string.format("%s = %s + %s", quotedCol, quotedCol, esc))
             elseif val.decrement then
-                local esc = SpectrumDB.escape(val.decrement, dataType)
+                local esc, err = driver:escape(val.decrement, dataType)
+                if err then return nil, err end
                 table.insert(parts, string.format("%s = %s - %s", quotedCol, quotedCol, esc))
             elseif val.multiply then
-                local esc = SpectrumDB.escape(val.multiply, dataType)
+                local esc, err = driver:escape(val.multiply, dataType)
+                if err then return nil, err end
                 table.insert(parts, string.format("%s = %s * %s", quotedCol, quotedCol, esc))
             else
-                error("SPECTRUM_VALIDATION_ERROR: Unsupported update structure for column: " .. col)
+                return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Unsupported update structure for column: " .. col }
             end
         else
-            table.insert(parts, string.format("%s = %s", SpectrumDB.driver.dialect.quoteIdent(col), SpectrumDB.escape(val, dataType)))
+            local escaped_val, err = driver:escape(val, dataType)
+            if err then return nil, err end
+            table.insert(parts, string.format("%s = %s", driver.dialect.quoteIdent(col), escaped_val))
         end
     end
     
-    return "SET " .. table.concat(parts, ", ")
+    return "SET " .. table.concat(parts, ", "), nil
 end
 
--- Validate and build SELECT fields
-function QueryBuilder.buildSelect(schema, selectFields)
+function QueryBuilder.buildSelect(driver, schema, selectFields)
     if not selectFields or next(selectFields) == nil then
-        return "*"
+        return "*", nil
     end
     
     local parts = {}
     if type(selectFields) == "table" then
-        -- Supports array representation e.g. { "id", "steamid" } or dictionary e.g. { id = true, steamid = true }
         for k, v in pairs(selectFields) do
             local col_name
             if type(k) == "number" and type(v) == "string" then
@@ -184,16 +162,18 @@ function QueryBuilder.buildSelect(schema, selectFields)
             
             if col_name then
                 if not schema[col_name] then
-                    error("SPECTRUM_VALIDATION_ERROR: Column '" .. tostring(col_name) .. "' requested in select is not defined in the schema.")
+                    return nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col_name, message = "Column '" .. tostring(col_name) .. "' requested in select is not defined in the schema." }
                 end
-                table.insert(parts, SpectrumDB.driver.dialect.quoteIdent(col_name))
+                table.insert(parts, driver.dialect.quoteIdent(col_name))
             end
         end
     end
     
     if #parts == 0 then
-        return "*"
+        return "*", nil
     end
     
-    return table.concat(parts, ", ")
+    return table.concat(parts, ", "), nil
 end
+
+return QueryBuilder

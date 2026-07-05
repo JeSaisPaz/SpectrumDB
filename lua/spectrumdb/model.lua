@@ -1,52 +1,34 @@
-SpectrumDB = SpectrumDB or {}
-
 local Model = {}
 Model.__index = Model
-
-SpectrumDB.Model = Model
 
 -- Model Instance metatable
 local ModelInstance = {}
 ModelInstance.__index = ModelInstance
 
-local function dbToLuaValue(val, dataType)
-    if val == nil or val == "NULL" then
-        return nil
-    end
+local function dbToLuaValue(Types, val, dataType)
+    if val == nil or val == "NULL" then return nil end
     
-    if dataType == SpectrumDB.Types.INTEGER then
+    if dataType == Types.INTEGER then
         return math.floor(tonumber(val) or 0)
-    elseif dataType == SpectrumDB.Types.FLOAT then
+    elseif dataType == Types.FLOAT then
         return tonumber(val) or 0
-    elseif dataType == SpectrumDB.Types.BOOLEAN then
+    elseif dataType == Types.BOOLEAN then
         return val == "1" or val == 1 or val == "true" or val == true
-    elseif dataType == SpectrumDB.Types.JSON then
+    elseif dataType == Types.JSON then
         if type(val) == "string" then
             if util and util.JSONToTable then
                 return util.JSONToTable(val)
-            else
-                -- Standalone Lua / Testing environment
-                if SpectrumDB.JSON then
-                    return SpectrumDB.JSON.decode(val) or val
-                end
-                return val
             end
         end
         return val
-    elseif dataType == SpectrumDB.Types.VECTOR then
+    elseif dataType == Types.VECTOR then
         local x, y, z = string.match(val, "([%d%.%-]+)%s+([%d%.%-]+)%s+([%d%.%-]+)")
-        if Vector then
-            return Vector(tonumber(x) or 0, tonumber(y) or 0, tonumber(z) or 0)
-        else
-            return { x = tonumber(x) or 0, y = tonumber(y) or 0, z = tonumber(z) or 0, __isVector = true }
-        end
-    elseif dataType == SpectrumDB.Types.ANGLE then
+        if Vector then return Vector(tonumber(x) or 0, tonumber(y) or 0, tonumber(z) or 0)
+        else return { x = tonumber(x) or 0, y = tonumber(y) or 0, z = tonumber(z) or 0, __isVector = true } end
+    elseif dataType == Types.ANGLE then
         local p, y, r = string.match(val, "([%d%.%-]+)%s+([%d%.%-]+)%s+([%d%.%-]+)")
-        if Angle then
-            return Angle(tonumber(p) or 0, tonumber(y) or 0, tonumber(r) or 0)
-        else
-            return { p = tonumber(p) or 0, y = tonumber(y) or 0, r = tonumber(r) or 0, __isAngle = true }
-        end
+        if Angle then return Angle(tonumber(p) or 0, tonumber(y) or 0, tonumber(r) or 0)
+        else return { p = tonumber(p) or 0, y = tonumber(y) or 0, r = tonumber(r) or 0, __isAngle = true } end
     else
         return val
     end
@@ -56,14 +38,13 @@ local function singularize(name)
     return string.lower(string.sub(name, 1, 1)) .. string.sub(name, 2)
 end
 
--- Create a model instance record
 local function createInstance(model, data)
-    -- Map row database string values back to Lua types
     local mapped = {}
+    local Types = model.db.Types
     for col, val in pairs(data) do
         local fieldSchema = model.schema[col]
         if fieldSchema then
-            mapped[col] = dbToLuaValue(val, fieldSchema.type)
+            mapped[col] = dbToLuaValue(Types, val, fieldSchema.type)
         else
             mapped[col] = val
         end
@@ -71,9 +52,7 @@ local function createInstance(model, data)
 
     local inst = setmetatable({}, {
         __index = function(t, k)
-            if ModelInstance[k] then
-                return ModelInstance[k]
-            end
+            if ModelInstance[k] then return ModelInstance[k] end
             return mapped[k]
         end,
         __newindex = function(t, k, v)
@@ -86,23 +65,17 @@ local function createInstance(model, data)
 end
 
 function ModelInstance:save(onSuccess, onError)
-    onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
-
     local model = rawget(self, "_model")
+    onSuccess = onSuccess or function() end
+    onError = onError or function(err) model.db.logger:error(err.message) end
+
     local data = rawget(self, "_data")
     local pk = model.pk_col
     if not pk or not data[pk] then
-        onError({
-            code = "SPECTRUM_VALIDATION_ERROR",
-            message = "Cannot save record without primary key."
-        })
+        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = "Cannot save record without primary key." })
         return
     end
 
-    -- Filter out includes (relations) and unmapped fields
     local cleanData = {}
     for k, v in pairs(data) do
         if model.schema[k] then
@@ -117,19 +90,14 @@ function ModelInstance:save(onSuccess, onError)
 end
 
 function ModelInstance:destroy(onSuccess, onError)
-    onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
-
     local model = rawget(self, "_model")
+    onSuccess = onSuccess or function() end
+    onError = onError or function(err) model.db.logger:error(err.message) end
+
     local data = rawget(self, "_data")
     local pk = model.pk_col
     if not pk or not data[pk] then
-        onError({
-            code = "SPECTRUM_VALIDATION_ERROR",
-            message = "Cannot destroy record without primary key."
-        })
+        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = "Cannot destroy record without primary key." })
         return
     end
 
@@ -138,8 +106,7 @@ function ModelInstance:destroy(onSuccess, onError)
     }, onSuccess, onError)
 end
 
--- Define Model Class
-function SpectrumDB.defineModel(name, config)
+function Model.new(db, name, config)
     if not config.schema then
         error("SpectrumDB: defineModel requires a 'schema' table.")
     end
@@ -147,21 +114,15 @@ function SpectrumDB.defineModel(name, config)
         error("SpectrumDB: defineModel requires a 'version' number.")
     end
     
-    -- Validate exactly one primary key constraint is defined
     local pk_col = nil
     for col, fieldSchema in pairs(config.schema) do
         if fieldSchema.primaryKey then
-            if pk_col then
-                error("SPECTRUM_VALIDATION_ERROR: Model '" .. name .. "' cannot define multiple primary keys.")
-            end
+            if pk_col then error("SPECTRUM_VALIDATION_ERROR: Model '" .. name .. "' cannot define multiple primary keys.") end
             pk_col = col
         end
     end
-    if not pk_col then
-        error("SPECTRUM_VALIDATION_ERROR: Model '" .. name .. "' must define exactly one primary key field.")
-    end
+    if not pk_col then error("SPECTRUM_VALIDATION_ERROR: Model '" .. name .. "' must define exactly one primary key field.") end
 
-    -- Validate migrations index continuity
     for i = 1, config.version do
         if i > 1 and not config.migrations[i] then
             error(string.format("SpectrumDB: migration manquante pour %s, version %d", name, i))
@@ -169,6 +130,7 @@ function SpectrumDB.defineModel(name, config)
     end
 
     local model = setmetatable({
+        db = db,
         name = name,
         schema = config.schema,
         version = config.version,
@@ -177,9 +139,6 @@ function SpectrumDB.defineModel(name, config)
         relations = config.relations or {}
     }, Model)
 
-    SpectrumDB.Models[name] = model
-
-    -- Scan schema for belongsTo relationships (statically resolvable)
     for col, fieldSchema in pairs(config.schema) do
         if fieldSchema.references then
             local targetModelName, targetFieldName = string.match(fieldSchema.references, "([%w_]+)%.([%w_]+)")
@@ -195,27 +154,9 @@ function SpectrumDB.defineModel(name, config)
         end
     end
 
-    if SpectrumDB.Migrator then
-        if not SpectrumDB.config or not SpectrumDB.config.driver then
-            local ok, err = pcall(function()
-                SpectrumDB.Migrator.run(name, config)
-            end)
-            if not ok then
-                error("SpectrumDB Migration Failure for model " .. name .. ": " .. tostring(err))
-            end
-        else
-            if not SpectrumDB._ready then
-                table.insert(SpectrumDB._pendingModels, { name = name, version = config.version, schema = config.schema, migrations = config.migrations })
-            else
-                SpectrumDB.Migrator.runAll({ { name = name, version = config.version, schema = config.schema, migrations = config.migrations } }, true)
-            end
-        end
-    end
-
     return model
 end
 
--- Load relations for records based on include parameters (Callback WaitGroup approach)
 local function loadIncludes(model, records, include, onSuccess, onError)
     if not include or next(include) == nil or #records == 0 then
         onSuccess(records)
@@ -235,15 +176,13 @@ local function loadIncludes(model, records, include, onSuccess, onError)
         if relEnabled then
             local rel = model.relations[relName]
             if rel then
-                local targetModel = SpectrumDB.Models[rel.targetModel]
+                local targetModel = model.db.models[rel.targetModel]
                 if targetModel then
-                    -- Propagate transaction context to target model if active
                     if model._txKey then
                         targetModel = setmetatable({ _txKey = model._txKey }, { __index = targetModel })
                     end
                     
                     if rel.type == "belongsTo" then
-                        -- For each record, load the single parent
                         for _, record in ipairs(records) do
                             local fkVal = record[rel.foreignKey]
                             if fkVal then
@@ -266,7 +205,6 @@ local function loadIncludes(model, records, include, onSuccess, onError)
                             end
                         end
                     elseif rel.type == "hasMany" then
-                        -- For each record, load children list
                         for _, record in ipairs(records) do
                             local pkVal = record[rel.targetField]
                             if pkVal then
@@ -299,68 +237,48 @@ local function loadIncludes(model, records, include, onSuccess, onError)
     end
 end
 
--- CRUD IMPLEMENTATION
+local QueryBuilder = include("spectrumdb/query_builder.lua") or require("spectrumdb.query_builder")
 
 function Model:create(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
+    onError = onError or function(err) self.db.logger:error(err.message) end
 
     local data = args.data or args
     local selectFields = args.select
     
-    -- Extract nested writes
     local nestedWrites = {}
     for relName, relValue in pairs(data) do
         local rel = self.relations[relName]
         if rel and type(relValue) == "table" and relValue.create then
-            nestedWrites[relName] = {
-                relation = rel,
-                createData = relValue.create
-            }
-            -- Remove from parent data so it doesn't fail column checks
+            nestedWrites[relName] = { relation = rel, createData = relValue.create }
             data[relName] = nil
         end
     end
     
-    local ok, sql_str = pcall(function()
-        return SpectrumDB.QueryBuilder.buildInsert(self.name, self.schema, data)
-    end)
-    if not ok then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(sql_str) })
-        return
-    end
+    local sql_str, err = QueryBuilder.buildInsert(self.db.driver, self.name, self.schema, data)
+    if err then onError(err) return end
     
-    SpectrumDB.driver.execute(sql_str, self._txKey, function()
-        -- Retrieve the created record
+    self.db:execute(sql_str, self._txKey, function()
         local findWhere = {}
         for col, fieldSchema in pairs(self.schema) do
-            if fieldSchema.primaryKey and data[col] then
-                findWhere[col] = data[col]
-            elseif fieldSchema.unique and data[col] then
+            if (fieldSchema.primaryKey or fieldSchema.unique) and data[col] then
                 findWhere[col] = data[col]
             end
         end
         
         local function handleSuccess(inst)
-            -- Process nested writes
             local pending = 0
             local hasErrored = false
             
             local function checkDone()
-                if pending == 0 and not hasErrored then
-                    onSuccess(inst)
-                end
+                if pending == 0 and not hasErrored then onSuccess(inst) end
             end
             
             for relName, write in pairs(nestedWrites) do
                 local rel = write.relation
-                local childModel = SpectrumDB.Models[rel.targetModel]
+                local childModel = self.db.models[rel.targetModel]
                 if childModel then
-                    if self._txKey then
-                        childModel = setmetatable({ _txKey = self._txKey }, { __index = childModel })
-                    end
+                    if self._txKey then childModel = setmetatable({ _txKey = self._txKey }, { __index = childModel }) end
                     for _, childData in ipairs(write.createData) do
                         childData[rel.foreignKey] = inst[rel.targetField]
                         pending = pending + 1
@@ -368,23 +286,21 @@ function Model:create(args, onSuccess, onError)
                             if hasErrored then return end
                             pending = pending - 1
                             checkDone()
-                        end, function(err)
+                        end, function(childErr)
                             if not hasErrored then
                                 hasErrored = true
-                                onError(err)
+                                onError(childErr)
                             end
                         end)
                     end
                 end
             end
             
-            if pending == 0 and not hasErrored then
-                onSuccess(inst)
-            end
+            if pending == 0 and not hasErrored then onSuccess(inst) end
         end
         
         if next(findWhere) == nil then
-            SpectrumDB.driver.execute("SELECT * FROM " .. self.name .. " ORDER BY " .. self.pk_col .. " DESC LIMIT 1", self._txKey, function(rows)
+            self.db:execute("SELECT * FROM " .. self.name .. " ORDER BY " .. self.pk_col .. " DESC LIMIT 1", self._txKey, function(rows)
                 if rows and rows[1] then
                     local inst = createInstance(self, rows[1])
                     handleSuccess(inst)
@@ -394,59 +310,37 @@ function Model:create(args, onSuccess, onError)
             end, onError)
         else
             self:findUnique({ where = findWhere, select = selectFields }, function(inst)
-                if inst then
-                    handleSuccess(inst)
-                else
-                    onError({ code = "SPECTRUM_NOT_FOUND", message = "Created record not found." })
-                end
+                if inst then handleSuccess(inst) else onError({ code = "SPECTRUM_NOT_FOUND", message = "Created record not found." }) end
             end, onError)
         end
-    end, function(err)
-        -- Intercept unique constraint error
-        if err.code == "SPECTRUM_SQL_ERROR" and string.find(string.lower(err.message), "unique constraint") then
-            onError({ code = "SPECTRUM_UNIQUE_CONSTRAINT", message = err.message, sql = err.sql })
+    end, function(execErr)
+        if execErr.code == "SPECTRUM_SQL_ERROR" and string.find(string.lower(execErr.message), "unique constraint") then
+            onError({ code = "SPECTRUM_UNIQUE_CONSTRAINT", message = execErr.message, sql = execErr.sql })
         else
-            onError(err)
+            onError(execErr)
         end
     end)
 end
 
 function Model:findUnique(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
+    onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where = args.where
-    local selectFields = args.select
-    local include = args.include
-
-    local ok, where_sql = pcall(function()
-        return SpectrumDB.QueryBuilder.buildWhere(self.schema, where)
-    end)
-    if not ok then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(where_sql) })
-        return
-    end
+    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    if errW then onError(errW) return end
     
-    local ok2, select_cols = pcall(function()
-        return SpectrumDB.QueryBuilder.buildSelect(self.schema, selectFields)
-    end)
-    if not ok2 then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(select_cols) })
-        return
-    end
+    local select_cols, errS = QueryBuilder.buildSelect(self.db.driver, self.schema, args.select)
+    if errS then onError(errS) return end
 
     local sql_str = string.format("SELECT %s FROM %s %s LIMIT 1", select_cols, self.name, where_sql)
     
-    SpectrumDB.driver.execute(sql_str, self._txKey, function(rows)
+    self.db:execute(sql_str, self._txKey, function(rows)
         if not rows or #rows == 0 then
             onSuccess(nil)
             return
         end
-        
         local inst = createInstance(self, rows[1])
-        loadIncludes(self, { inst }, include, function()
+        loadIncludes(self, { inst }, args.include, function()
             onSuccess(inst)
         end, onError)
     end, onError)
@@ -454,44 +348,27 @@ end
 
 function Model:findMany(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
+    onError = onError or function(err) self.db.logger:error(err.message) end
 
     args = args or {}
-    local where = args.where
-    local selectFields = args.select
-    local include = args.include
-    local orderBy = args.orderBy
-    local limit = args.limit
-
-    local ok, where_sql = pcall(function()
-        return SpectrumDB.QueryBuilder.buildWhere(self.schema, where)
-    end)
-    if not ok then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(where_sql) })
-        return
-    end
     
-    local ok2, select_cols = pcall(function()
-        return SpectrumDB.QueryBuilder.buildSelect(self.schema, selectFields)
-    end)
-    if not ok2 then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(select_cols) })
-        return
-    end
+    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    if errW then onError(errW) return end
+    
+    local select_cols, errS = QueryBuilder.buildSelect(self.db.driver, self.schema, args.select)
+    if errS then onError(errS) return end
 
     local order_sql = ""
-    if orderBy then
-        local col, dir = next(orderBy)
+    if args.orderBy then
+        local col, dir = next(args.orderBy)
         if col then
             dir = string.upper(dir)
             if dir ~= "ASC" and dir ~= "DESC" then
-                onError({ code = "SPECTRUM_VALIDATION_ERROR", message = "Invalid orderBy direction." })
+                onError({ code = "SPECTRUM_VALIDATION_ERROR", field = "orderBy", message = "Invalid orderBy direction." })
                 return
             end
             if not self.schema[col] then
-                onError({ code = "SPECTRUM_VALIDATION_ERROR", message = "Column '" .. tostring(col) .. "' used in orderBy is not defined in the schema." })
+                onError({ code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column used in orderBy is not defined in the schema." })
                 return
             end
             order_sql = string.format("ORDER BY %s %s", col, dir)
@@ -499,119 +376,66 @@ function Model:findMany(args, onSuccess, onError)
     end
     
     local limit_sql = ""
-    if limit then
-        limit_sql = "LIMIT " .. tostring(math.floor(tonumber(limit) or 1))
-    end
+    if args.limit then limit_sql = "LIMIT " .. tostring(math.floor(tonumber(args.limit) or 1)) end
     
     local sql_str = string.format("SELECT %s FROM %s %s %s %s", select_cols, self.name, where_sql, order_sql, limit_sql)
     
-    SpectrumDB.driver.execute(sql_str, self._txKey, function(rows)
-        if not rows or #rows == 0 then
-            onSuccess({})
-            return
-        end
-        
+    self.db:execute(sql_str, self._txKey, function(rows)
+        if not rows or #rows == 0 then onSuccess({}) return end
         local instances = {}
-        for _, row in ipairs(rows) do
-            table.insert(instances, createInstance(self, row))
-        end
-        
-        loadIncludes(self, instances, include, function()
-            onSuccess(instances)
-        end, onError)
+        for _, row in ipairs(rows) do table.insert(instances, createInstance(self, row)) end
+        loadIncludes(self, instances, args.include, function() onSuccess(instances) end, onError)
     end, onError)
 end
 
 function Model:update(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
+    onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where = args.where
-    local data = args.data or args
-
-    local ok, where_sql = pcall(function()
-        return SpectrumDB.QueryBuilder.buildWhere(self.schema, where)
-    end)
-    if not ok then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(where_sql) })
-        return
-    end
+    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    if errW then onError(errW) return end
     
-    local ok2, set_sql = pcall(function()
-        return SpectrumDB.QueryBuilder.buildUpdate(self.schema, data)
-    end)
-    if not ok2 then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(set_sql) })
-        return
-    end
+    local set_sql, errS = QueryBuilder.buildUpdate(self.db.driver, self.schema, args.data or args)
+    if errS then onError(errS) return end
     
     local sql_str = string.format("UPDATE %s %s %s", self.name, set_sql, where_sql)
     
-    SpectrumDB.driver.execute(sql_str, self._txKey, function()
-        self:findUnique({ where = where }, function(inst)
-            if inst then
-                onSuccess(inst)
-            else
-                onError({ code = "SPECTRUM_NOT_FOUND", message = "Record not found after update." })
-            end
+    self.db:execute(sql_str, self._txKey, function()
+        self:findUnique({ where = args.where }, function(inst)
+            if inst then onSuccess(inst) else onError({ code = "SPECTRUM_NOT_FOUND", message = "Record not found after update." }) end
         end, onError)
-    end, function(err)
-        -- Intercept unique constraint error
-        if err.code == "SPECTRUM_SQL_ERROR" and string.find(string.lower(err.message), "unique constraint") then
-            onError({ code = "SPECTRUM_UNIQUE_CONSTRAINT", message = err.message, sql = err.sql })
+    end, function(execErr)
+        if execErr.code == "SPECTRUM_SQL_ERROR" and string.find(string.lower(execErr.message), "unique constraint") then
+            onError({ code = "SPECTRUM_UNIQUE_CONSTRAINT", message = execErr.message, sql = execErr.sql })
         else
-            onError(err)
+            onError(execErr)
         end
     end)
 end
 
 function Model:delete(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
+    onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where = args.where
-
-    local ok, where_sql = pcall(function()
-        return SpectrumDB.QueryBuilder.buildWhere(self.schema, where)
-    end)
-    if not ok then
-        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = tostring(where_sql) })
-        return
-    end
+    local where_sql, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    if errW then onError(errW) return end
     
-    -- Find the record first to return it on success
-    self:findUnique({ where = where }, function(inst)
-        if not inst then
-            onError({ code = "SPECTRUM_NOT_FOUND", message = "Record to delete not found." })
-            return
-        end
+    self:findUnique({ where = args.where }, function(inst)
+        if not inst then onError({ code = "SPECTRUM_NOT_FOUND", message = "Record to delete not found." }) return end
         
         local sql_str = string.format("DELETE FROM %s %s", self.name, where_sql)
-        SpectrumDB.driver.execute(sql_str, self._txKey, function()
-            onSuccess(inst)
-        end, onError)
+        self.db:execute(sql_str, self._txKey, function() onSuccess(inst) end, onError)
     end, onError)
 end
 
 function Model:upsert(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
-    onError = onError or function(err) 
-        if SpectrumDB and SpectrumDB.log then SpectrumDB.log.error(err.message) end 
-    end
+    onError = onError or function(err) self.db.logger:error(err.message) end
 
-    local where = args.where
-    local updateData = args.update
-    local createData = args.create
-
-    self:findUnique({ where = where }, function(inst)
-        if inst then
-            self:update({ where = where, data = updateData }, onSuccess, onError)
-        else
-            self:create({ data = createData }, onSuccess, onError)
-        end
+    self:findUnique({ where = args.where }, function(inst)
+        if inst then self:update({ where = args.where, data = args.update }, onSuccess, onError)
+        else self:create({ data = args.create }, onSuccess, onError) end
     end, onError)
 end
+
+return Model
