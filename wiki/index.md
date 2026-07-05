@@ -1,30 +1,43 @@
 ---
 title: SpectrumDB Wiki Index
 tags: [index, wiki, spectrumdb]
-date: 2026-07-04
+date: 2026-07-05
 source_count: 2
 ---
 
-# SpectrumDB - LLM Wiki Index
+# SpectrumDB Documentation
 
-Welcome to the **SpectrumDB** LLM Wiki. This wiki compiles architectural notes, design decisions, GLua documentation, and progress logs for the SpectrumDB ORM project.
+Welcome to the **SpectrumDB** Wiki. SpectrumDB is a high-performance, intent-driven ORM designed for Garry's Mod, supporting both `SQLite` and `MySQLOO` seamlessly.
 
-## 🎓 Beginner's Guide Course
-Start here to learn SpectrumDB step by step!
-- [[Course-01-Getting-Started]]: Philosophy, Database Connection, and Initialization.
-- [[Course-02-Defining-Models]]: Schema building, Data Types, and Automatic Migrations.
-- [[Course-03-CRUD-Operations]]: Creating, Reading, Updating, and Deleting records.
-- [[Course-04-Relationships]]: `belongsTo`, `hasMany`, nested writes, and `include` joins.
-- [[Course-05-Pro-Tips-and-Productivity]]: Transactions, Intent Caching, rawQuery, and Tick Budgeting.
+---
 
-## 📚 Core Documentation
+## 🚀 Getting Started
 
-- [[SpectrumDB-Concept]]: The core vision, problem statement, and high-level architecture of SpectrumDB.
-- [[GLua-Databases]]: Summary of research on Garry's Mod database systems (SQLite, MySQLOO, HTTP syncing) and their limitations.
-- [[API-Design-Drafts]]: Design proposals for SpectrumDB's model definition and query API, including relationships, transactions, and filters.
-- [[Migration-System]]: Details on the versioned migration system built to work safely with SQLite.
-- [[Error-Handling]]: Overview of typed error codes, GMod SQLite quirks, and handling unhandled promise rejections.
+* [[Quickstart]]: Connect to the database, define your first model, and write data in under 5 minutes.
 
-## Project Log
+---
 
-- [[log]]: Chronological activity log of tasks, decisions, and development progress.
+## 🧠 Concepts
+
+* [[Concepts-Execution-Engine]]: Discover how SpectrumDB prevents server frame drops using its Deduplicating Cache and Time-Sliced Scheduler.
+
+---
+
+## 📚 ORM Reference
+
+* [[Models-and-Schema]]: Learn how to define models, assign data types, and utilize automatic version-controlled migrations.
+* [[Client-Queries]]: Master CRUD operations (Create, Read, Update, Delete), including atomic increments and complex filtering.
+* [[Client-Relations]]: Connect your data using `hasMany` and `belongsTo`, and utilize `include` for nested reads and writes.
+* [[Client-Transactions]]: Ensure absolute data integrity with interactive transaction blocks.
+
+---
+
+## 🏗️ Architecture & Logs (Legacy)
+*(Historical design decisions)*
+
+- [[SpectrumDB-Concept]]: The core vision, problem statement, and high-level architecture.
+- [[GLua-Databases]]: Summary of research on Garry's Mod database systems and their limitations.
+- [[API-Design-Drafts]]: Initial design proposals for SpectrumDB.
+- [[Migration-System]]: Details on the versioned migration system.
+- [[Error-Handling]]: Overview of typed error codes.
+- [[log]]: Chronological activity log of tasks and decisions.
