@@ -18,3 +18,19 @@ All development milestones, research insights, and major structural changes are 
 - **TDD Verification**: Set up Bun + Wasmoon test runner and verified all 13 unit tests pass successfully.
 - **Autoload & Demo**: Created `lua/autorun/spectrumdb_init.lua` for autoloading and `lua/autorun/server/spectrumdb_demo.lua` as an integration demo for addon developers.
 
+## [2026-07-05] architecture | Phase 5 Execution Engine
+- **Intent-Driven Engine**: Completely overhauled the ORM to act as a Gateway rather than a blind wrapper.
+- **Deduplication Cache**: Introduced `cache.lua` to intelligently merge identical queries executing in the same tick window.
+- **Scheduler**: Introduced `scheduler.lua` implementing a strict 5ms per-tick budget to guarantee Garry's Mod never freezes during mass SQLite queries.
+- **Drivers**: Added full native support for `mysqloo` with real multi-threading and native prepared statements.
+- **Transactions**: Refactored `transaction.lua` to provide strict locking mechanisms that bypass the scheduler safely.
+
+## [2026-07-05] documentation | Prisma-style Wiki Refactor
+- **Wiki Structure**: Restructured the Obsidian vault to strictly mimic Prisma's documentation. Created separate pages for `Models-and-Schema`, `Client-Queries`, `Client-Relations`, and `Client-Transactions`.
+- **README Cleanup**: Removed bulky tutorial code blocks from the root `README.md`, turning it into a sharp landing page that redirects to the Wiki.
+
+## [2026-07-05] architecture | Ecosystem & Scalability Fixes
+- **Global Instance Registry**: Implemented `SpectrumDB.register` and `SpectrumDB.get` so multiple independent addons can hook into the exact same database engine without redundant credentials or competing tick-budgets.
+- **N+1 Performance Fix**: Rewrote `loadIncludes` to batch relational fetches using the `IN (...)` operator, dropping 100+ queries down to 2 queries for heavy relationships.
+- **Addon Integration Guide**: Documented the cross-addon registry in `Addon-Integration-Guide.md`.
+- **Planned Work**: Drafted implementation plans for chunked `UNION ALL` eager loading limits, and TMySQL4/Connection Pooling integration.
