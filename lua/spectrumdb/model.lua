@@ -321,14 +321,23 @@ function Model:create(args, onSuccess, onError)
     local sql_str, bindings, err = QueryBuilder.buildInsert(self.db.driver, self.name, self.schema, data)
     if err then onError(err) return end
     
-    self.db:execute(sql_str, bindings, self._txKey, function()
+    self.db:execute(sql_str, bindings, self._txKey, function(_, meta)
         -- Invalidate model cache
         self.db.cache:invalidate(self.name)
-        
+
         local findWhere = {}
         for col, fieldSchema in pairs(self.schema) do
             if (fieldSchema.primaryKey or fieldSchema.unique) and data[col] then
                 findWhere[col] = data[col]
+            end
+        end
+
+        -- Prefer the driver-reported autoincrement id over the ORDER BY ... LIMIT 1
+        -- fallback below, which races other concurrent inserts into the same table.
+        if next(findWhere) == nil and meta and meta.lastInsertId and meta.lastInsertId ~= 0 then
+            local pkSchema = self.schema[self.pk_col]
+            if pkSchema and pkSchema.autoIncrement then
+                findWhere[self.pk_col] = meta.lastInsertId
             end
         end
         
@@ -374,7 +383,7 @@ function Model:create(args, onSuccess, onError)
                 else
                     onError({ code = "SPECTRUM_NOT_FOUND", message = "Could not verify created record." })
                 end
-            end, onError)
+            end, onError, self._txKey and 0 or 1)
         else
             self:findUnique({ where = findWhere, select = selectFields }, function(inst)
                 if inst then handleSuccess(inst) else onError({ code = "SPECTRUM_NOT_FOUND", message = "Created record not found." }) end
@@ -386,7 +395,7 @@ function Model:create(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end, 1) -- Create uses priority 1
+    end, self._txKey and 0 or 1) -- Priority 0 keeps this dispatched while its own transaction holds the connection
 end
 
 function Model:findUnique(args, onSuccess, onError)
@@ -412,25 +421,33 @@ function Model:findUnique(args, onSuccess, onError)
     end
     
     local cacheKey = self.db.cache:buildKey(self.name, "query", cacheKeyData)
-    
+
+    -- Fetches the raw row (pre-instance). This is what gets cached/deduped -- never a
+    -- live ModelInstance -- because instances are mutable (assigning a field writes
+    -- straight through), so caching one would let one addon's mutation corrupt what
+    -- every other caller reads back for the same row.
     local function fallbackFunc(cbSuccess, cbError)
         self.db:execute(sql_str, bindings, self._txKey, function(rows)
-            if not rows or #rows == 0 then
-                cbSuccess(nil)
-                return
-            end
-            local inst = createInstance(self, rows[1])
-            loadIncludes(self, { inst }, args.include, function()
-                cbSuccess(inst)
-            end, cbError)
-        end, cbError, 1)
+            cbSuccess(rows and rows[1] or nil)
+        end, cbError, self._txKey and 0 or 1)
     end
-    
-    -- If we are in a transaction, bypass caching to ensure reading dirty state is correct
-    if self._txKey then
-        fallbackFunc(onSuccess, onError)
+
+    local function buildResult(rawRow, resultSuccess, resultError)
+        if not rawRow then resultSuccess(nil) return end
+        local inst = createInstance(self, rawRow)
+        loadIncludes(self, { inst }, args.include, function()
+            resultSuccess(inst)
+        end, resultError)
+    end
+
+    -- If we are in a transaction, cache is globally disabled, or includes are present, bypass caching.
+    -- (Includes are bypassed because join-aware cache invalidation is not yet implemented)
+    if self._txKey or not self.db.config.enableCache or args.include then
+        fallbackFunc(function(rawRow) buildResult(rawRow, onSuccess, onError) end, onError)
     else
-        self.db.cache:dedupeAndCache(cacheKey, self.db.config.CacheTTL, fallbackFunc, onSuccess, onError)
+        self.db.cache:dedupeAndCache(cacheKey, self.db.config.CacheTTL, fallbackFunc, function(rawRow)
+            buildResult(rawRow, onSuccess, onError)
+        end, onError)
     end
 end
 
@@ -478,26 +495,40 @@ function Model:findMany(args, onSuccess, onError)
     end
     
     local cacheKey = self.db.cache:buildKey(self.name, "query", cacheKeyData)
-    
+
+    -- Same reasoning as findUnique: cache/dedupe the raw rows, not live instances.
     local function fallbackFunc(cbSuccess, cbError)
         self.db:execute(sql_str, bindings, self._txKey, function(rows)
-            if not rows or #rows == 0 then cbSuccess({}) return end
-            local instances = {}
-            for _, row in ipairs(rows) do table.insert(instances, createInstance(self, row)) end
-            loadIncludes(self, instances, args.include, function() cbSuccess(instances) end, cbError)
-        end, cbError, 1)
+            cbSuccess(rows or {})
+        end, cbError, self._txKey and 0 or 1)
     end
-    
-    if self._txKey then
-        fallbackFunc(onSuccess, onError)
+
+    local function buildResult(rawRows, resultSuccess, resultError)
+        if not rawRows or #rawRows == 0 then resultSuccess({}) return end
+        local instances = {}
+        for _, row in ipairs(rawRows) do table.insert(instances, createInstance(self, row)) end
+        loadIncludes(self, instances, args.include, function() resultSuccess(instances) end, resultError)
+    end
+
+    -- If we are in a transaction, cache is globally disabled, or includes are present, bypass caching.
+    -- (Includes are bypassed because join-aware cache invalidation is not yet implemented)
+    if self._txKey or not self.db.config.enableCache or args.include then
+        fallbackFunc(function(rawRows) buildResult(rawRows, onSuccess, onError) end, onError)
     else
-        self.db.cache:dedupeAndCache(cacheKey, self.db.config.CacheTTL, fallbackFunc, onSuccess, onError)
+        self.db.cache:dedupeAndCache(cacheKey, self.db.config.CacheTTL, fallbackFunc, function(rawRows)
+            buildResult(rawRows, onSuccess, onError)
+        end, onError)
     end
 end
 
 function Model:update(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) self.db.logger:error(err.message) end
+
+    if not args.where or next(args.where) == nil then
+        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = "update requires a non-empty where clause. Use updateMany for bulk updates." })
+        return
+    end
 
     local where_sql, bindingsW, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
@@ -525,12 +556,46 @@ function Model:update(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end, 1)
+    end, self._txKey and 0 or 1)
+end
+
+function Model:updateMany(args, onSuccess, onError)
+    onSuccess = onSuccess or function() end
+    onError = onError or function(err) self.db.logger:error(err.message) end
+
+    local where_sql, bindingsW, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    if errW then onError(errW) return end
+    
+    local set_sql, bindingsS, errS = QueryBuilder.buildUpdate(self.db.driver, self.schema, args.data or args)
+    if errS then onError(errS) return end
+    
+    local bindings = {}
+    for _, b in ipairs(bindingsS) do table.insert(bindings, b) end
+    for _, b in ipairs(bindingsW) do table.insert(bindings, b) end
+    
+    local sql_str = string.format("UPDATE %s %s %s", self.name, set_sql, where_sql)
+    
+    self.db:execute(sql_str, bindings, self._txKey, function()
+        -- Invalidate entire table cache since we don't know exactly which rows were updated
+        self.db.cache:invalidate(self.name)
+        onSuccess()
+    end, function(execErr)
+        if execErr.code == "SPECTRUM_SQL_ERROR" and string.find(string.lower(execErr.message), "unique constraint") then
+            onError({ code = "SPECTRUM_UNIQUE_CONSTRAINT", message = execErr.message, sql = execErr.sql })
+        else
+            onError(execErr)
+        end
+    end, self._txKey and 0 or 1)
 end
 
 function Model:delete(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) self.db.logger:error(err.message) end
+
+    if not args.where or next(args.where) == nil then
+        onError({ code = "SPECTRUM_VALIDATION_ERROR", message = "delete requires a non-empty where clause. Use deleteMany for bulk deletes." })
+        return
+    end
 
     local where_sql, bindings, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
@@ -543,10 +608,25 @@ function Model:delete(args, onSuccess, onError)
             -- Hybrid Invalidation
             local rowId = args.where[self.pk_col]
             self.db.cache:invalidate(self.name, rowId)
-            
+
             onSuccess(inst)
-        end, onError, 1)
+        end, onError, self._txKey and 0 or 1)
     end, onError)
+end
+
+function Model:deleteMany(args, onSuccess, onError)
+    onSuccess = onSuccess or function() end
+    onError = onError or function(err) self.db.logger:error(err.message) end
+
+    local where_sql, bindings, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
+    if errW then onError(errW) return end
+    
+    local sql_str = string.format("DELETE FROM %s %s", self.name, where_sql)
+    self.db:execute(sql_str, bindings, self._txKey, function()
+        -- Invalidate entire table cache since we don't know exactly which rows were deleted
+        self.db.cache:invalidate(self.name)
+        onSuccess()
+    end, onError, self._txKey and 0 or 1)
 end
 
 function Model:upsert(args, onSuccess, onError)

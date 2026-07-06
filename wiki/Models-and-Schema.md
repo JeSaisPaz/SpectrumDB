@@ -59,6 +59,8 @@ SpectrumDB actively verifies Lua data against these types before insertion to pr
 | `db.Types.VECTOR` | GMod Vector objects. | `TEXT` | `VARCHAR` |
 | `db.Types.ANGLE` | GMod Angle objects. | `TEXT` | `VARCHAR` |
 
+> **Large identifiers (SteamID64, etc.) must use `STRING`, not `INTEGER`.** GMod/LuaJIT numbers are IEEE-754 doubles, so integers beyond 2^53 (roughly 9 quadrillion) — which a 64-bit SteamID exceeds — lose precision if stored as `INTEGER`. SpectrumDB rejects any `INTEGER` value outside that safe range with a `SPECTRUM_VALIDATION_ERROR` rather than silently truncating it; store SteamID64s (and other big identifiers) as `STRING` instead.
+
 > [!TIP]
 > **GMod Native Types:** When you define a column as `db.Types.VECTOR` or `db.Types.ANGLE`, you can pass standard `Vector(x,y,z)` or `Angle(p,y,r)` directly into the `create` or `update` API. SpectrumDB serializes them to strings for the database, and automatically deserializes them back into fully functional `Vector`/`Angle` objects when you query them!
 

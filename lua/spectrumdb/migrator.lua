@@ -28,6 +28,10 @@ function Migrator.run(db, modelDef, isUrgent)
         local schemaSql, err = SchemaMigrator.generate(db.driver, modelName, modelDef.schema)
         if err then error("Schema generation failed: " .. err.message) end
         db.driver:executeSync(schemaSql)
+    else
+        SchemaMigrator.diff(db, modelName, modelDef.schema, function() end, function(err)
+            db.logger:error("Auto-migration diff failed for " .. modelName, err)
+        end)
     end
     
     for v = currentVersion + 1, modelDef.version do
@@ -79,7 +83,7 @@ function Migrator.runAll(db, pendingModels)
         local modelName = modelDef.name
         
         local function executeAsync(sql, txKey, onSuccess, onError)
-            db:execute(sql, txKey, onSuccess, onError, 1) -- 1 = urgent priority
+            db:execute(sql, {}, txKey, onSuccess, onError, 1) -- 1 = urgent priority
         end
         
         executeAsync("CREATE TABLE IF NOT EXISTS _spectrumdb_migrations (model_name TEXT PRIMARY KEY, version INTEGER, applied_at INTEGER)", "MIGRATION_INIT", function()
@@ -159,7 +163,12 @@ function Migrator.runAll(db, pendingModels)
                         processMigrations()
                     end)
                 else
-                    processMigrations()
+                    SchemaMigrator.diff(db, modelName, modelDef.schema, function()
+                        processMigrations()
+                    end, function(err)
+                        db.logger:error("Auto-migration diff failed for " .. modelName, err)
+                        processMigrations()
+                    end)
                 end
             end)
         end)

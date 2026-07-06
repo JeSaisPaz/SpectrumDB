@@ -11,6 +11,11 @@ local User = SpectrumDB.defineModel("User", {
         points    = { type = SpectrumDB.Types.INTEGER, default = 0 },
         lastPos   = { type = SpectrumDB.Types.VECTOR }
     },
+    -- InventoryItem.userId already gets an automatic belongsTo("user") from its
+    -- `references`; the inverse hasMany has to be declared explicitly here.
+    relations = {
+        inventoryItems = { type = "hasMany", targetModel = "InventoryItem", foreignKey = "userId", targetField = "id" }
+    },
     migrations = {
         [1] = function(db)
             db:exec([[
@@ -48,66 +53,62 @@ local InventoryItem = SpectrumDB.defineModel("InventoryItem", {
     }
 })
 
--- 2. Asynchronous demo workflow
+-- 2. Demo workflow.
+-- SpectrumDB's public API is callback-based (onSuccess/onError) -- there is no
+-- async/await sugar -- so the steps below are chained through callbacks.
+local function fail(step)
+    return function(err)
+        print("[SpectrumDB Demo] " .. step .. " failed: " .. tostring(err and err.message or err))
+    end
+end
+
 timer.Simple(1, function()
-    print("[SpectrumDB Demo] Starting async query demo...")
+    print("[SpectrumDB Demo] Starting demo workflow...")
 
-    SpectrumDB.async(function()
-        -- clean slate for demo
-        sql.Query("DELETE FROM User")
-        sql.Query("DELETE FROM InventoryItem")
+    -- clean slate for demo
+    sql.Query("DELETE FROM InventoryItem")
+    sql.Query("DELETE FROM User")
 
-        print("[SpectrumDB Demo] Creating a new user...")
-        local user = SpectrumDB.await(User:create({
-            steamid = "STEAM_0:1:456789",
-            name = "Louis",
-            points = 100,
-            lastPos = Vector(120, -450, 64)
-        }))
+    print("[SpectrumDB Demo] Creating a new user...")
+    User:create({
+        steamid = "STEAM_0:1:456789",
+        name = "Louis",
+        points = 100,
+        lastPos = Vector(120, -450, 64)
+    }, function(user)
         print("[SpectrumDB Demo] User created: " .. user.name .. " (ID: " .. user.id .. ", Points: " .. user.points .. ")")
 
-        -- Create associated inventory items
         print("[SpectrumDB Demo] Adding items to inventory...")
-        SpectrumDB.await(InventoryItem:create({
-            userId = user.id,
-            itemName = "Stun Stick",
-            quantity = 1
-        }))
-        SpectrumDB.await(InventoryItem:create({
-            userId = user.id,
-            itemName = "Health Kit",
-            quantity = 5
-        }))
+        InventoryItem:create({ userId = user.id, itemName = "Stun Stick", quantity = 1 }, function()
+            InventoryItem:create({ userId = user.id, itemName = "Health Kit", quantity = 5 }, function()
 
-        -- Query user with relation loading (include inventoryItems)
-        print("[SpectrumDB Demo] Fetching user with inventory items loaded...")
-        local fetchedUser = SpectrumDB.await(User:findUnique({
-            where = { steamid = "STEAM_0:1:456789" },
-            include = { inventoryItems = true }
-        }))
+                print("[SpectrumDB Demo] Fetching user with inventory items loaded...")
+                User:findUnique({
+                    where = { steamid = "STEAM_0:1:456789" },
+                    include = { inventoryItems = true }
+                }, function(fetchedUser)
+                    print("[SpectrumDB Demo] User: " .. fetchedUser.name .. " has position: " .. tostring(fetchedUser.lastPos))
+                    if fetchedUser.inventoryItems then
+                        for _, item in ipairs(fetchedUser.inventoryItems) do
+                            print("  - Item: " .. item.itemName .. " (Qty: " .. item.quantity .. ")")
+                        end
+                    end
 
-        print("[SpectrumDB Demo] User: " .. fetchedUser.name .. " has position: " .. tostring(fetchedUser.lastPos))
-        if fetchedUser.inventoryItems then
-            for _, item in ipairs(fetchedUser.inventoryItems) do
-                print("  - Item: " .. item.itemName .. " (Qty: " .. item.quantity .. ")")
-            end
-        end
-
-        -- Perform atomic points increment inside a transaction
-        print("[SpectrumDB Demo] Incrementing user points atomically inside a transaction...")
-        SpectrumDB.await(SpectrumDB.transaction(function(tx)
-            return tx.User:update({
-                where = { id = fetchedUser.id },
-                data = {
-                    points = { increment = 50 }
-                }
-            })
-        end))
-
-        -- Verify updated points
-        local updatedUser = SpectrumDB.await(User:findUnique({
-            where = { id = fetchedUser.id }
-        }))
-        print("[SpectrumDB Demo] Final Points check: " .. updatedUser.name .. " now has " .. updatedUser.points .. " points.")
-    end)
+                    print("[SpectrumDB Demo] Incrementing user points atomically inside a transaction...")
+                    SpectrumDB.transaction(function(tx, commit, rollback)
+                        tx.User:update({
+                            where = { id = fetchedUser.id },
+                            data = { points = { increment = 50 } }
+                        }, function()
+                            commit()
+                        end, rollback)
+                    end, function()
+                        User:findUnique({ where = { id = fetchedUser.id } }, function(updatedUser)
+                            print("[SpectrumDB Demo] Final Points check: " .. updatedUser.name .. " now has " .. updatedUser.points .. " points.")
+                        end, fail("Final points check"))
+                    end, fail("Points increment transaction"))
+                end, fail("Fetch user with inventory"))
+            end, fail("Create Health Kit"))
+        end, fail("Create Stun Stick"))
+    end, fail("Create user"))
 end)

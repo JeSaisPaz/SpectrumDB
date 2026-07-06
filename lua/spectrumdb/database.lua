@@ -54,7 +54,9 @@ function SpectrumDB.new(config)
     -- Instantiate Driver
     local driverName = string.lower(instance.config.driver or "sqlite")
     if driverName == "mysqloo" and SpectrumDB.Drivers.MySQLOO then
-        instance.driver = SpectrumDB.Drivers.MySQLOO.new(instance)
+        instance.driver = SpectrumDB.Drivers.MySQLOO.new(instance, SpectrumDB.Drivers)
+    elseif driverName == "tmysql4" and SpectrumDB.Drivers.TMySQL4 then
+        instance.driver = SpectrumDB.Drivers.TMySQL4.new(instance, SpectrumDB.Drivers)
     else
         if not SpectrumDB.Drivers.SQLite then
             error("SQLite driver not found!")

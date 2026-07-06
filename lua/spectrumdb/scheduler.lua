@@ -17,6 +17,7 @@ function Scheduler.new(db)
     instance.activeTx = nil
     instance.running = false
     instance.scheduled = false
+    instance.paused = false
     
     return instance
 end
@@ -49,6 +50,7 @@ function Scheduler:enqueue(sql, bindings, priority, txKey, onSuccess, onError)
 end
 
 function Scheduler:scheduleTick()
+    if self.paused then return end
     if not self.scheduled and not self.running then
         self.scheduled = true
         if timer and timer.Simple then
@@ -75,21 +77,25 @@ function Scheduler:mergeDeferredQueue()
 end
 
 function Scheduler:dequeueTask()
+    if self.paused then return nil end
+    
     local now = SysTime()
     local maxWaitTime = self.db.config.MaxWaitTime or 0.200 -- 200ms
     
     -- Starvation Prevention: Check if any task in normal/low queue has waited too long
     -- We do a quick scan of the heads of lower priority queues
-    for p = 1, 2 do
-        local q = self.queues[p]
-        if q.head <= q.tail then
-            local task = q.items[q.head]
-            if task and not task.processed and (now - task.queuedAt) > maxWaitTime then
-                -- Promote this task and return it immediately
-                task.processed = true
-                q.items[q.head] = nil
-                q.head = q.head + 1
-                return task
+    if not self.activeTx then
+        for p = 1, 2 do
+            local q = self.queues[p]
+            if q.head <= q.tail then
+                local task = q.items[q.head]
+                if task and not task.processed and (now - task.queuedAt) > maxWaitTime then
+                    -- Promote this task and return it immediately
+                    task.processed = true
+                    q.items[q.head] = nil
+                    q.head = q.head + 1
+                    return task
+                end
             end
         end
     end
@@ -138,7 +144,7 @@ function Scheduler:dequeueTask()
 end
 
 function Scheduler:processQueue()
-    if self.running then return end
+    if self.running or self.paused then return end
     self.scheduled = false
     self.running = true
     
@@ -218,6 +224,33 @@ function Scheduler:processQueue()
     
     if hasPending then
         self:scheduleTick()
+    end
+end
+
+function Scheduler:pause()
+    self.paused = true
+end
+
+function Scheduler:resume()
+    self.paused = false
+    self:scheduleTick()
+end
+
+function Scheduler:failPendingTasks(err)
+    for p = 0, 2 do
+        local q = self.queues[p]
+        for i = q.head, q.tail do
+            local task = q.items[i]
+            if task and not task.processed then
+                task.processed = true
+                if task.onError then
+                    task.onError(err)
+                end
+            end
+        end
+        q.head = 1
+        q.tail = 0
+        q.items = {}
     end
 end
 

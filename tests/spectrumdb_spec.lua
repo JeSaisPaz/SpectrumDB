@@ -36,12 +36,21 @@ local mock_db_tables = {}
 local mock_db_rows = {}
 local mock_last_error = nil
 local mock_query_log = {}
+local mock_last_insert_id = nil
 
 function sql.ClearMock()
     mock_db_tables = {}
     mock_db_rows = {}
     mock_last_error = nil
     mock_query_log = {}
+    mock_last_insert_id = nil
+end
+
+function sql.QueryValue(query_str)
+    if string.find(string.upper(query_str), "LAST_INSERT_ROWID") then
+        return mock_last_insert_id and tostring(mock_last_insert_id) or nil
+    end
+    return nil
 end
 
 function sql.Query(query_str)
@@ -90,7 +99,8 @@ function sql.Query(query_str)
             if not row.id then
                 row.id = tostring(#mock_db_rows[tableName] + 1)
             end
-            
+            mock_last_insert_id = tonumber(row.id)
+
             local replaced = false
             if tableName == "_spectrumdb_migrations" then
                 for _, r in ipairs(mock_db_rows[tableName]) do
@@ -155,7 +165,7 @@ function sql.Query(query_str)
                         updates[col] = val
                     end
                 end
-                
+
                 local count = 0
                 for _, r in ipairs(mock_db_rows[tableName]) do
                     if r[where_col] == where_val then
@@ -163,6 +173,26 @@ function sql.Query(query_str)
                             r[k] = v
                         end
                         count = count + 1
+                    end
+                end
+                return nil
+            end
+
+            -- No WHERE clause at all: bulk update every row (used by updateMany tests)
+            local setOnly = string.match(query_str, "^UPDATE%s+[%w_]+%s+SET%s+(.+)$")
+            if setOnly then
+                local updates = {}
+                for part in string.gmatch(setOnly, "[^,]+") do
+                    local col, val = string.match(part, "([%w_]+)%s*=%s*(.-)%s*$")
+                    if col and val then
+                        val = string.gsub(val, "^%s*['\"]", "")
+                        val = string.gsub(val, "['\"]%s*$", "")
+                        updates[col] = val
+                    end
+                end
+                for _, r in ipairs(mock_db_rows[tableName]) do
+                    for k, v in pairs(updates) do
+                        r[k] = v
                     end
                 end
                 return nil
@@ -182,6 +212,12 @@ function sql.Query(query_str)
                     end
                 end
                 mock_db_rows[tableName] = keep
+                return nil
+            end
+
+            -- No WHERE clause at all: bulk delete every row (used by deleteMany tests)
+            if not string.find(upper, "WHERE") then
+                mock_db_rows[tableName] = {}
                 return nil
             end
         end
@@ -659,5 +695,330 @@ describe("Extended Schema & Transactions", function()
         assert_eq(execution_order[2], "EXT_FIND", "External query should run after transaction")
         
         assert_eq(#db.scheduler.deferredQueue, 0, "Deferred queue should be empty")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 6. ASYNC MIGRATIONS & DRIVER FALLBACK TEST SUITE
+--------------------------------------------------------------------------------
+describe("Async Migrations & Driver Fallback", function()
+    local dbLib = include("spectrumdb/database.lua")
+    dbLib.Drivers = dbLib.Drivers or {}
+    dbLib.Drivers.SQLite = include("spectrumdb/driver_sqlite.lua")
+    dbLib.Drivers.MySQLOO = include("spectrumdb/driver_mysqloo.lua")
+    
+    it("should successfully run Migrator.runAll end-to-end with async driver", function()
+        sql.ClearMock()
+        
+        -- Create a dummy async driver by extending SQLite to pretend to be async
+        local MockAsyncDriver = {}
+        MockAsyncDriver.__index = MockAsyncDriver
+        function MockAsyncDriver.new(db)
+            local inst = setmetatable({}, MockAsyncDriver)
+            inst.db_instance = db
+            inst.dialect = dbLib.Drivers.SQLite.new(db).dialect
+            return inst
+        end
+        function MockAsyncDriver:escape(val, dataType)
+            return dbLib.Drivers.SQLite.new(self.db_instance):escape(val, dataType)
+        end
+        function MockAsyncDriver:connect(config, onReady, onError)
+            timer.Simple(0, onReady)
+        end
+        -- execute simulates async
+        function MockAsyncDriver:execute(query_str, bindings, onSuccess, onError)
+            local res = sql.Query(query_str)
+            if res == false then
+                timer.Simple(0, function() onError({message = sql.LastError(), sql = query_str}) end)
+            else
+                timer.Simple(0, function() onSuccess(res) end)
+            end
+        end
+        
+        dbLib.Drivers.MockAsync = MockAsyncDriver
+        
+        local db = dbLib.new({ driver = "mockasync" })
+        local TestModel = db:defineModel("AsyncModel", {
+            version = 1,
+            schema = { id = { type = db.Types.INTEGER, primaryKey = true } },
+            migrations = { [1] = function(mgr) mgr:exec("CREATE TABLE AsyncModel (id INTEGER PRIMARY KEY)") end }
+        })
+        
+        while timer.RunPending() do end
+        
+        local res = sql.Query("SELECT * FROM _spectrumdb_migrations WHERE model_name = 'AsyncModel'")
+        assert_true(res ~= nil and #res == 1, "Migration log should contain one row for 'AsyncModel'")
+        assert_eq(tostring(res[1].version), "1", "Database version should be 1")
+    end)
+    
+    it("should fallback to SQLite when mysqloo module is missing or connection fails", function()
+        sql.ClearMock()
+        
+        -- ensure mysqloo is nil
+        mysqloo = nil
+        
+        local db = dbLib.new({ driver = "mysqloo", fallbackToSQLite = true })
+        -- Since mysqloo is nil, it should immediately fallback to SQLite
+        while timer.RunPending() do end
+        
+        assert_true(db._ready, "Database should be ready after fallback")
+        assert_true(db.driver ~= nil, "Driver should not be nil")
+        assert_true(db.driver.executeSync ~= nil, "Driver should be SQLite which has executeSync")
+    end)
+    
+    it("should fallback to SQLite when tmysql4 module is missing", function()
+        sql.ClearMock()
+        tmysql = nil
+        
+        local db = dbLib.new({ driver = "tmysql4", fallbackToSQLite = true })
+        while timer.RunPending() do end
+        
+        assert_true(db._ready, "Database should be ready after fallback")
+        assert_true(db.driver ~= nil, "Driver should not be nil")
+        assert_true(db.driver.executeSync ~= nil, "Driver should be SQLite which has executeSync")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 7. SCHEMA MIGRATOR DIFFING
+--------------------------------------------------------------------------------
+describe("SchemaMigrator Diffing", function()
+    local db = initTestDB()
+    local SchemaMigrator = include("spectrumdb/schema_migrator.lua")
+    
+    it("should generate ADD COLUMN statements for missing columns", function()
+        sql.ClearMock()
+        sql.Query("CREATE TABLE DiffTest (id INTEGER PRIMARY KEY)")
+        
+        local schema = {
+            id = { type = db.Types.INTEGER, primaryKey = true },
+            newCol = { type = db.Types.STRING, default = "test" },
+            points = { type = db.Types.INTEGER, default = 0 }
+        }
+        
+        local success_called = false
+        SchemaMigrator.diff(db, "DiffTest", schema, function()
+            success_called = true
+        end)
+        
+        while timer.RunPending() do end
+        
+        assert_true(success_called, "Diffing should succeed")
+        
+        -- Check if ADD COLUMN queries were executed
+        local has_newCol = false
+        local has_points = false
+        
+        for _, q in ipairs(mock_query_log) do
+            if string.find(q, "ALTER TABLE DiffTest ADD COLUMN newCol") then
+                has_newCol = true
+            elseif string.find(q, "ALTER TABLE DiffTest ADD COLUMN points") then
+                has_points = true
+            end
+        end
+        
+        assert_true(has_newCol, "Should generate ADD COLUMN for newCol")
+        assert_true(has_points, "Should generate ADD COLUMN for points")
+    end)
+end)
+
+--------------------------------------------------------------------------------
+-- 8. AUDIT FIX REGRESSION SUITE
+--------------------------------------------------------------------------------
+describe("Audit Fixes: Bulk Guard Rails", function()
+    local db = initTestDB()
+
+    it("should reject update()/delete() with an empty where and allow updateMany()/deleteMany() for intentional bulk ops", function()
+        sql.ClearMock()
+
+        local Item = db:defineModel("GuardItem", {
+            version = 1,
+            schema = {
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                status = { type = db.Types.STRING, default = "pending" }
+            },
+            migrations = {
+                [1] = function(db_mgr) db_mgr:exec("CREATE TABLE GuardItem (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT)") end
+            }
+        })
+        while timer.RunPending() do end
+
+        Item:create({ status = "pending" })
+        Item:create({ status = "pending" })
+        Item:create({ status = "pending" })
+        while timer.RunPending() do end
+
+        -- update()/delete() must refuse an empty where -- this used to silently
+        -- become a full-table UPDATE/DELETE.
+        local updateErr, deleteErr = nil, nil
+        Item:update({ where = {}, data = { status = "wiped" } }, nil, function(e) updateErr = e end)
+        Item:delete({ where = {} }, nil, function(e) deleteErr = e end)
+        while timer.RunPending() do end
+
+        assert_true(updateErr ~= nil and updateErr.code == "SPECTRUM_VALIDATION_ERROR", "update() with empty where should be rejected")
+        assert_true(deleteErr ~= nil and deleteErr.code == "SPECTRUM_VALIDATION_ERROR", "delete() with empty where should be rejected")
+
+        local stillThree = nil
+        Item:findMany({}, function(rows) stillThree = rows end)
+        while timer.RunPending() do end
+        assert_eq(#stillThree, 3, "Rows must be untouched after the rejected calls")
+
+        -- updateMany()/deleteMany() are the explicit bulk escape hatches.
+        local bulkUpdateOk = false
+        Item:updateMany({ where = {}, data = { status = "archived" } }, function() bulkUpdateOk = true end, function(e) print("updateMany error", e.message) end)
+        while timer.RunPending() do end
+        assert_true(bulkUpdateOk, "updateMany() should succeed with an empty where")
+
+        local allArchived = nil
+        Item:findMany({}, function(rows) allArchived = rows end)
+        while timer.RunPending() do end
+        for _, row in ipairs(allArchived) do
+            assert_eq(row.status, "archived", "updateMany should have updated every row")
+        end
+
+        local bulkDeleteOk = false
+        Item:deleteMany({ where = {} }, function() bulkDeleteOk = true end, function(e) print("deleteMany error", e.message) end)
+        while timer.RunPending() do end
+        assert_true(bulkDeleteOk, "deleteMany() should succeed with an empty where")
+
+        local afterDelete = nil
+        Item:findMany({}, function(rows) afterDelete = rows end)
+        while timer.RunPending() do end
+        assert_eq(#afterDelete, 0, "deleteMany() should have removed every row")
+    end)
+end)
+
+describe("Audit Fixes: Transaction Queueing", function()
+    local db = initTestDB()
+
+    it("should queue a second concurrent transaction instead of rejecting it, running both to completion in order", function()
+        sql.ClearMock()
+
+        local Counter = db:defineModel("Counter", {
+            version = 1,
+            schema = {
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                value = { type = db.Types.INTEGER, default = 0 }
+            },
+            migrations = {
+                [1] = function(db_mgr) db_mgr:exec("CREATE TABLE Counter (id INTEGER PRIMARY KEY AUTOINCREMENT, value INTEGER)") end
+            }
+        })
+        while timer.RunPending() do end
+
+        Counter:create({ value = 1 })
+        while timer.RunPending() do end
+
+        local order = {}
+        local err1, err2 = nil, nil
+
+        db:transaction(function(tx, commit, rollback)
+            tx.Counter:update({ where = { id = 1 }, data = { value = 10 } }, function()
+                table.insert(order, "TX1")
+                commit()
+            end, rollback)
+        end, nil, function(e) err1 = e end)
+
+        -- Fired immediately after, while the first transaction is still open --
+        -- this must NOT be rejected as a nested transaction. It should queue and
+        -- run once the first one commits.
+        db:transaction(function(tx, commit, rollback)
+            tx.Counter:update({ where = { id = 1 }, data = { value = 20 } }, function()
+                table.insert(order, "TX2")
+                commit()
+            end, rollback)
+        end, nil, function(e) err2 = e end)
+
+        while timer.RunPending() do end
+
+        assert_true(err1 == nil, "First transaction should not error")
+        assert_true(err2 == nil, "Second (queued) transaction should not be rejected as nested")
+        assert_eq(order[1], "TX1", "First transaction should complete first")
+        assert_eq(order[2], "TX2", "Second transaction should complete after the first")
+
+        local final = nil
+        Counter:findUnique({ where = { id = 1 } }, function(inst) final = inst end)
+        while timer.RunPending() do end
+        assert_eq(tostring(final.value), "20", "Second transaction's write should have applied after the first committed")
+    end)
+end)
+
+describe("Audit Fixes: lastInsertId Create Path", function()
+    local db = initTestDB()
+
+    it("should look up a newly created record via the driver's lastInsertId instead of ORDER BY ... LIMIT 1", function()
+        sql.ClearMock()
+
+        local Log = db:defineModel("LogEntry", {
+            version = 1,
+            schema = {
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                message = { type = db.Types.STRING }
+            },
+            migrations = {
+                [1] = function(db_mgr) db_mgr:exec("CREATE TABLE LogEntry (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT)") end
+            }
+        })
+        while timer.RunPending() do end
+
+        local created = nil
+        Log:create({ message = "hello" }, function(inst) created = inst end, function(e) print("create error", e.message) end)
+        while timer.RunPending() do end
+
+        assert_true(created ~= nil, "Create should succeed")
+        assert_eq(created.message, "hello")
+
+        local usedOrderByFallback = false
+        for _, q in ipairs(mock_query_log) do
+            if string.find(q, "ORDER BY id DESC LIMIT 1") then
+                usedOrderByFallback = true
+            end
+        end
+        assert_false(usedOrderByFallback, "Create should use lastInsertId, not the racy ORDER BY DESC LIMIT 1 fallback")
+    end)
+end)
+
+describe("Audit Fixes: Cache Immutability", function()
+    it("should not let a mutated cached instance corrupt what other callers read back", function()
+        sql.ClearMock()
+
+        local dbLib = include("spectrumdb/database.lua")
+        dbLib.Drivers = dbLib.Drivers or {}
+        dbLib.Drivers.SQLite = include("spectrumdb/driver_sqlite.lua")
+        local db = dbLib.new({ driver = "sqlite", enableCache = true, CacheTTL = 30 })
+
+        local Doc = db:defineModel("CacheDoc", {
+            version = 1,
+            schema = {
+                id = { type = db.Types.INTEGER, primaryKey = true, autoIncrement = true },
+                title = { type = db.Types.STRING }
+            },
+            migrations = {
+                [1] = function(db_mgr) db_mgr:exec("CREATE TABLE CacheDoc (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)") end
+            }
+        })
+        while timer.RunPending() do end
+
+        Doc:create({ title = "Original" })
+        while timer.RunPending() do end
+
+        local first = nil
+        Doc:findUnique({ where = { id = 1 } }, function(inst) first = inst end)
+        while timer.RunPending() do end
+        assert_true(first ~= nil, "First lookup should find the record")
+        assert_eq(first.title, "Original")
+
+        -- Simulate one addon mutating the instance it got back (a plain field
+        -- assignment, without calling :save()). This must not corrupt what the
+        -- cache hands back to a second, unrelated caller.
+        first.title = "Mutated-By-Addon-A"
+
+        local second = nil
+        Doc:findUnique({ where = { id = 1 } }, function(inst) second = inst end)
+        while timer.RunPending() do end
+
+        assert_true(second ~= nil, "Second lookup should hit the cache")
+        assert_eq(second.title, "Original", "Cached read must not reflect another caller's local mutation")
+        assert_true(first ~= second, "Each caller should get its own instance, not a shared one")
     end)
 end)

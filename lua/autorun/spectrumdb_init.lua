@@ -33,9 +33,47 @@ if SERVER then
     -- Load and register drivers globally under the Database class
     Database.Drivers.SQLite = include("spectrumdb/driver_sqlite.lua")
     Database.Drivers.MySQLOO = include("spectrumdb/driver_mysqloo.lua")
+    Database.Drivers.TMySQL4 = include("spectrumdb/driver_tmysql4.lua")
     
     -- Expose SpectrumDB globally for instantiation
     SpectrumDB = Database
+    
+    -- Global Shim for Backward Compatibility (Zero-Config SQLite)
+    SpectrumDB.Models = {}
+    local defaultGlobalInstance = nil
+
+    local originalDefineModel = SpectrumDB.defineModel
+    function SpectrumDB.defineModel(selfOrName, modelNameOrSchema, maybeSchema)
+        if type(selfOrName) == "string" or selfOrName == SpectrumDB then
+            local name = type(selfOrName) == "string" and selfOrName or modelNameOrSchema
+            local schema = type(selfOrName) == "string" and modelNameOrSchema or maybeSchema
+            
+            if not defaultGlobalInstance then
+                defaultGlobalInstance = SpectrumDB.new({ driver = "sqlite", _isGlobalShim = true })
+                defaultGlobalInstance.models = SpectrumDB.Models
+            end
+            return defaultGlobalInstance:defineModel(name, schema)
+        else
+            return originalDefineModel(selfOrName, modelNameOrSchema, maybeSchema)
+        end
+    end
+
+    local originalTransaction = SpectrumDB.transaction
+    function SpectrumDB.transaction(selfOrFunc, funcOrOnSuccess, onSuccessOrOnError, maybeOnError)
+        if type(selfOrFunc) == "function" or selfOrFunc == SpectrumDB then
+            local func = type(selfOrFunc) == "function" and selfOrFunc or funcOrOnSuccess
+            local onSuccess = type(selfOrFunc) == "function" and funcOrOnSuccess or onSuccessOrOnError
+            local onError = type(selfOrFunc) == "function" and onSuccessOrOnError or maybeOnError
+            
+            if not defaultGlobalInstance then
+                defaultGlobalInstance = SpectrumDB.new({ driver = "sqlite", _isGlobalShim = true })
+                defaultGlobalInstance.models = SpectrumDB.Models
+            end
+            return defaultGlobalInstance:transaction(func, onSuccess, onError)
+        else
+            return originalTransaction(selfOrFunc, funcOrOnSuccess, onSuccessOrOnError, maybeOnError)
+        end
+    end
 
     if MsgC and Color then
         local c_cyan   = Color(0, 255, 255)

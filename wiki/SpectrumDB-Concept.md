@@ -19,7 +19,7 @@ Writing database code in Garry's Mod has historically been either:
 - **Fluent API**: Define schemas and execute queries using fluent, modern Lua methods (e.g. `User:create(...)`, `User:findMany(...)`).
 - **Safe by Default**: Automatically sanitizes inputs, preventing SQL injection vulnerabilities.
 - **Integrated Migrations**: Automatically creates and updates tables when schemas change.
-- **Pluggable Drivers**: Uses GMod SQLite by default, but allows swapping to `mysqloo` for MySQL.
+- **Pluggable Drivers**: Uses GMod SQLite by default, but allows swapping to `mysqloo` or `tmysql4` for MySQL.
 
 ## 3. High-Level Architecture
 

@@ -4,6 +4,41 @@ local function isTable(t)
     return type(t) == "table" and not (t.x and t.y) and not (t.p and t.r)
 end
 
+-- 2^53: GMod/LuaJIT numbers are IEEE-754 doubles, so integers beyond this
+-- magnitude (e.g. a 64-bit SteamID) silently lose precision if coerced through
+-- tonumber()/math.floor(). Reject them here -- once -- instead of letting each
+-- driver coerce (and corrupt) them differently. Large identifiers should use
+-- type STRING instead of INTEGER.
+local MAX_SAFE_INTEGER = 9007199254740992
+
+-- Single source of truth for "is this value even the type the schema claims".
+-- Runs before any driver-specific escape/bind, so SQLite, MySQLOO and TMySQL4
+-- all reject (or accept) exactly the same inputs instead of diverging (e.g.
+-- one driver silently coercing a bad INTEGER to 0 while another errors).
+local function validateValue(field, val, dataType, Types)
+    if val == nil then return nil end
+
+    if dataType == Types.INTEGER then
+        local num = tonumber(val)
+        if not num then
+            return { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' expected an INTEGER, got " .. tostring(val) }
+        end
+        if num >= MAX_SAFE_INTEGER or num <= -MAX_SAFE_INTEGER then
+            return { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' value exceeds safe integer precision (2^53). Use type STRING for large identifiers such as SteamID64." }
+        end
+    elseif dataType == Types.FLOAT then
+        if not tonumber(val) then
+            return { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' expected a FLOAT, got " .. tostring(val) }
+        end
+    elseif dataType == Types.BOOLEAN then
+        if type(val) ~= "boolean" then
+            return { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Field '" .. tostring(field) .. "' expected a BOOLEAN (true/false), got " .. type(val) }
+        end
+    end
+
+    return nil
+end
+
 function QueryBuilder.buildWhere(driver, schema, where)
     if not where or next(where) == nil then
         return "", {}, nil
@@ -53,6 +88,8 @@ function QueryBuilder.buildWhere(driver, schema, where)
                     end
                     local placeholders = {}
                     for _, list_val in ipairs(val) do
+                        local valErr = validateValue(field, list_val, dataType, Types)
+                        if valErr then return nil, nil, valErr end
                         table.insert(placeholders, "?")
                         table.insert(bindings, { value = list_val, type = dataType })
                     end
@@ -61,13 +98,19 @@ function QueryBuilder.buildWhere(driver, schema, where)
                 else
                     return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = field, message = "Unknown query operator: " .. tostring(op) }
                 end
-                
+
+                do
+                    local valErr = validateValue(field, val, dataType, Types)
+                    if valErr then return nil, nil, valErr end
+                end
                 table.insert(parts, string.format("%s %s ?", dialect.quoteIdent(field), sql_op))
                 table.insert(bindings, { value = val, type = dataType })
-                
+
                 ::continue::
             end
         else
+            local valErr = validateValue(field, filter, dataType, Types)
+            if valErr then return nil, nil, valErr end
             table.insert(parts, string.format("%s = ?", dialect.quoteIdent(field)))
             table.insert(bindings, { value = filter, type = dataType })
         end
@@ -86,11 +129,15 @@ function QueryBuilder.buildInsert(driver, tableName, schema, data)
     local bindings = {}
     local dialect = driver.dialect
     
+    local Types = driver.db_instance and driver.db_instance.Types or driver.db.Types
+
     for col, val in pairs(data) do
         local fieldSchema = schema[col]
         if not fieldSchema then
             return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
         end
+        local valErr = validateValue(col, val, fieldSchema.type, Types)
+        if valErr then return nil, nil, valErr end
         table.insert(cols, dialect.quoteIdent(col))
         table.insert(placeholders, "?")
         table.insert(bindings, { value = val, type = fieldSchema.type })
@@ -110,17 +157,22 @@ function QueryBuilder.buildUpdate(driver, schema, data)
     local parts = {}
     local bindings = {}
     local dialect = driver.dialect
-    
+    local Types = driver.db_instance and driver.db_instance.Types or driver.db.Types
+
     for col, val in pairs(data) do
         local fieldSchema = schema[col]
         if not fieldSchema then
             return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Column '" .. tostring(col) .. "' is not defined in the schema." }
         end
-        
+
         local dataType = fieldSchema.type
         local quotedCol = dialect.quoteIdent(col)
-        
+
         if isTable(val) then
+            local atomicVal = val.increment or val.decrement or val.multiply
+            local valErr = validateValue(col, atomicVal, dataType, Types)
+            if valErr then return nil, nil, valErr end
+
             if val.increment then
                 table.insert(parts, string.format("%s = %s + ?", quotedCol, quotedCol))
                 table.insert(bindings, { value = val.increment, type = dataType })
@@ -134,11 +186,13 @@ function QueryBuilder.buildUpdate(driver, schema, data)
                 return nil, nil, { code = "SPECTRUM_VALIDATION_ERROR", field = col, message = "Unsupported update structure for column: " .. col }
             end
         else
+            local valErr = validateValue(col, val, dataType, Types)
+            if valErr then return nil, nil, valErr end
             table.insert(parts, string.format("%s = ?", quotedCol))
             table.insert(bindings, { value = val, type = dataType })
         end
     end
-    
+
     return "SET " .. table.concat(parts, ", "), bindings, nil
 end
 

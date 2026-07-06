@@ -11,7 +11,7 @@ Get started with SpectrumDB in your Garry's Mod gamemode. In this guide, you'll 
 ## Prerequisites
 
 You need a Garry's Mod server environment.
-If you plan to use MySQL, ensure you have the `mysqloo` module installed in `garrysmod/lua/bin/`. For SQLite, nothing is required as it comes built-in with GMod.
+If you plan to use MySQL, ensure you have either the `mysqloo` or `tmysql4` module installed in `garrysmod/lua/bin/`. For SQLite, nothing is required as it comes built-in with GMod.
 
 ---
 
@@ -27,7 +27,7 @@ local db = SpectrumDB.new({
     driver = "sqlite", -- Start with SQLite for local development
     database = "sv.db",
     
-    -- When moving to production, you can switch this to 'mysqloo'
+    -- When moving to production, you can switch this to 'mysqloo' or 'tmysql4'
     -- host = "127.0.0.1",
     -- username = "root",
     -- password = "password"

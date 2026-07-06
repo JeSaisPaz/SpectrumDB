@@ -117,4 +117,65 @@ function SchemaMigrator.generateAlterAddColumn(driver, modelName, colName, field
     return sql, nil
 end
 
+function SchemaMigrator.diff(db, modelName, schema, onSuccess, onError)
+    local driverName = string.lower(db.config.driver or "sqlite")
+    
+    local query_str
+    if driverName == "sqlite" then
+        query_str = "PRAGMA table_info(" .. db.driver.dialect.quoteIdent(modelName) .. ")"
+    else
+        query_str = "SHOW COLUMNS FROM " .. db.driver.dialect.quoteIdent(modelName)
+    end
+    
+    -- Priority 1 for migrations
+    db:execute(query_str, {}, nil, function(rows)
+        local existingColumns = {}
+        for _, row in ipairs(rows or {}) do
+            local colName = row.name or row.Field
+            if colName then
+                existingColumns[colName] = true
+            end
+        end
+        
+        local missingColumns = {}
+        for colName, _ in pairs(schema) do
+            if not existingColumns[colName] then
+                table.insert(missingColumns, colName)
+            end
+        end
+        
+        if #missingColumns == 0 then
+            if onSuccess then onSuccess() end
+            return
+        end
+        
+        local queries = {}
+        for _, colName in ipairs(missingColumns) do
+            local sql, err = SchemaMigrator.generateAlterAddColumn(db.driver, modelName, colName, schema[colName])
+            if err then
+                if onError then onError(err) end
+                return
+            end
+            table.insert(queries, sql)
+        end
+        
+        local function executeNext(index)
+            if index > #queries then
+                if onSuccess then onSuccess() end
+                return
+            end
+            
+            db.logger:info("Auto-migrating " .. modelName .. ": " .. queries[index])
+            db:execute(queries[index], {}, nil, function()
+                executeNext(index + 1)
+            end, function(err)
+                if onError then onError(err) end
+            end, 1)
+        end
+        
+        executeNext(1)
+        
+    end, onError, 1)
+end
+
 return SchemaMigrator

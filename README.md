@@ -1,6 +1,6 @@
 # 🌈 SpectrumDB
 
-SpectrumDB is a high-performance, intent-driven Object-Relational Mapper (ORM) designed specifically for Garry's Mod. It provides out-of-the-box support for both **SQLite** (zero-config) and **MySQL** (via `mysqloo`).
+SpectrumDB is a high-performance, intent-driven Object-Relational Mapper (ORM) designed specifically for Garry's Mod. It provides out-of-the-box support for **SQLite** (zero-config), **MySQLOO**, and **tmysql4**.
 
 Designed to solve the prevalent server lag spikes associated with synchronous SQLite queries and saturated MySQLOO threads, SpectrumDB acts as a smart gateway between your addons and your database.
 
@@ -50,6 +50,7 @@ garrysmod/addons/spectrumdb/
         ├── database.lua
         ├── driver_sqlite.lua
         ├── driver_mysqloo.lua
+        ├── driver_tmysql4.lua
         ├── cache.lua
         ├── scheduler.lua
         ├── model.lua

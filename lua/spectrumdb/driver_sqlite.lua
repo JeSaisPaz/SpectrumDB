@@ -58,7 +58,7 @@ function SQLiteDriver:execute(query_str, bindings, onSuccess, onError)
     end
 
     local result = sql.Query(final_sql)
-    
+
     if result == false then
         local sqlErr = sql.LastError() or "Unknown SQL error"
         onError({
@@ -67,7 +67,13 @@ function SQLiteDriver:execute(query_str, bindings, onSuccess, onError)
             sql = final_sql
         })
     else
-        onSuccess(result)
+        -- Expose the autoincrement id of the row we just inserted so callers (Model:create)
+        -- can look the record up directly instead of racing other writers with ORDER BY ... LIMIT 1.
+        local lastInsertId = nil
+        if sql.QueryValue and string.match(string.upper(string.gsub(final_sql, "^%s+", "")), "^INSERT") then
+            lastInsertId = tonumber(sql.QueryValue("SELECT last_insert_rowid()"))
+        end
+        onSuccess(result, { lastInsertId = lastInsertId })
     end
 end
 
