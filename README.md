@@ -61,6 +61,29 @@ garrysmod/addons/spectrumdb/
 
 ---
 
+## Server Administration & Utility Addon Suite
+
+SpectrumDB ships with four standalone reference addons that demonstrate real
+production usage -- admin actions, playtime tracking, an economy, and event
+logging. Each is a fully independent GMod addon (install alongside
+`spectrumdb/` in your `addons/` folder) that talks to SpectrumDB through
+`SpectrumDB.defineModel(...)`, the same zero-config shared SQLite instance, so
+they interoperate without any addon depending on another's internals.
+
+| Addon | What it adds | Showcases |
+|---|---|---|
+| [spectrumdb-adminlog](spectrumdb-adminlog/README.md) | `sdb_ban` / `sdb_kick` / `sdb_warn` / `sdb_mute` / `sdb_history` | Transactions, `upsert`, `include`, sync/async hook boundaries |
+| [spectrumdb-playerstats](spectrumdb-playerstats/README.md) | Playtime & session tracking, `sdb_playtime` / `sdb_topplaytime` | High-frequency writes, atomic `increment`, crash-resilient checkpointing |
+| [spectrumdb-economy](spectrumdb-economy/README.md) | Balances + ledger, `sdb_pay` / `sdb_grant` / `sdb_take` / `sdb_richest` | Read-inside-transaction balance transfers with rollback on insufficient funds |
+| [spectrumdb-serverlog](spectrumdb-serverlog/README.md) | Chat/connect/disconnect/death logging, `sdb_recentlogs` | The time-sliced scheduler + low-priority writes under burst load |
+
+These are reference implementations meant to be read, copied from, and
+extended -- not a full replacement for a dedicated admin mod. See each
+addon's README for its data model, commands, and integration points (e.g.
+overriding the permission check to defer to ULX/SAM).
+
+---
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

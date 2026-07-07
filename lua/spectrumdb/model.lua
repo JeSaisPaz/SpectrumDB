@@ -302,6 +302,16 @@ end
 
 local QueryBuilder = include("spectrumdb/query_builder.lua") or require("spectrumdb.query_builder")
 
+-- Transactional queries must always run at priority 0 to be dispatched while
+-- their own transaction holds the connection (see scheduler.lua). Outside a
+-- transaction, callers may opt a query into a lower priority (e.g. high-volume
+-- logging) via args.priority; defaults to the normal priority (1).
+local function resolvePriority(txKey, args)
+    if txKey then return 0 end
+    if args and args.priority ~= nil then return args.priority end
+    return 1
+end
+
 function Model:create(args, onSuccess, onError)
     onSuccess = onSuccess or function() end
     onError = onError or function(err) self.db.logger:error(err.message) end
@@ -383,7 +393,7 @@ function Model:create(args, onSuccess, onError)
                 else
                     onError({ code = "SPECTRUM_NOT_FOUND", message = "Could not verify created record." })
                 end
-            end, onError, self._txKey and 0 or 1)
+            end, onError, resolvePriority(self._txKey, args))
         else
             self:findUnique({ where = findWhere, select = selectFields }, function(inst)
                 if inst then handleSuccess(inst) else onError({ code = "SPECTRUM_NOT_FOUND", message = "Created record not found." }) end
@@ -395,7 +405,7 @@ function Model:create(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end, self._txKey and 0 or 1) -- Priority 0 keeps this dispatched while its own transaction holds the connection
+    end, resolvePriority(self._txKey, args))
 end
 
 function Model:findUnique(args, onSuccess, onError)
@@ -429,7 +439,7 @@ function Model:findUnique(args, onSuccess, onError)
     local function fallbackFunc(cbSuccess, cbError)
         self.db:execute(sql_str, bindings, self._txKey, function(rows)
             cbSuccess(rows and rows[1] or nil)
-        end, cbError, self._txKey and 0 or 1)
+        end, cbError, resolvePriority(self._txKey, args))
     end
 
     local function buildResult(rawRow, resultSuccess, resultError)
@@ -500,7 +510,7 @@ function Model:findMany(args, onSuccess, onError)
     local function fallbackFunc(cbSuccess, cbError)
         self.db:execute(sql_str, bindings, self._txKey, function(rows)
             cbSuccess(rows or {})
-        end, cbError, self._txKey and 0 or 1)
+        end, cbError, resolvePriority(self._txKey, args))
     end
 
     local function buildResult(rawRows, resultSuccess, resultError)
@@ -556,7 +566,7 @@ function Model:update(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end, self._txKey and 0 or 1)
+    end, resolvePriority(self._txKey, args))
 end
 
 function Model:updateMany(args, onSuccess, onError)
@@ -585,7 +595,7 @@ function Model:updateMany(args, onSuccess, onError)
         else
             onError(execErr)
         end
-    end, self._txKey and 0 or 1)
+    end, resolvePriority(self._txKey, args))
 end
 
 function Model:delete(args, onSuccess, onError)
@@ -610,7 +620,7 @@ function Model:delete(args, onSuccess, onError)
             self.db.cache:invalidate(self.name, rowId)
 
             onSuccess(inst)
-        end, onError, self._txKey and 0 or 1)
+        end, onError, resolvePriority(self._txKey, args))
     end, onError)
 end
 
@@ -620,13 +630,13 @@ function Model:deleteMany(args, onSuccess, onError)
 
     local where_sql, bindings, errW = QueryBuilder.buildWhere(self.db.driver, self.schema, args.where)
     if errW then onError(errW) return end
-    
+
     local sql_str = string.format("DELETE FROM %s %s", self.name, where_sql)
     self.db:execute(sql_str, bindings, self._txKey, function()
         -- Invalidate entire table cache since we don't know exactly which rows were deleted
         self.db.cache:invalidate(self.name)
         onSuccess()
-    end, onError, self._txKey and 0 or 1)
+    end, onError, resolvePriority(self._txKey, args))
 end
 
 function Model:upsert(args, onSuccess, onError)
